@@ -9,8 +9,7 @@ import type {
   TelegramInlineKeyboardMarkup,
   TelegramSentMessage,
 } from "./types.js";
-import { sanitizeFileName } from "../utils.js";
-import { chunkFormattedTelegramText, formatTelegramText } from "./format.js";
+import { chunkParagraphs, sanitizeFileName } from "../utils.js";
 
 export class TelegramApi {
   constructor(private readonly getConfig: () => TelegramConfig) {}
@@ -103,8 +102,8 @@ export class TelegramApi {
     text: string,
   ): Promise<number | undefined> {
     let lastMessageId: number | undefined;
-    for (const chunk of chunkFormattedTelegramText(text)) {
-      const sent = await this.sendMessageRaw(chatId, chunk.text, chunk.parseMode);
+    for (const chunk of chunkParagraphs(text)) {
+      const sent = await this.sendMessage(chatId, chunk);
       lastMessageId = sent.message_id;
     }
     return lastMessageId;
@@ -115,25 +114,9 @@ export class TelegramApi {
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<TelegramSentMessage> {
-    const formatted = formatTelegramText(text);
-    return await this.sendMessageRaw(
-      chatId,
-      formatted.text,
-      formatted.parseMode,
-      replyMarkup,
-    );
-  }
-
-  private async sendMessageRaw(
-    chatId: number,
-    text: string,
-    parseMode?: "HTML",
-    replyMarkup?: TelegramInlineKeyboardMarkup,
-  ): Promise<TelegramSentMessage> {
     return await this.call<TelegramSentMessage>("sendMessage", {
       chat_id: chatId,
       text,
-      ...(parseMode ? { parse_mode: parseMode } : {}),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   }
@@ -144,12 +127,10 @@ export class TelegramApi {
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<void> {
-    const formatted = formatTelegramText(text);
     await this.call<unknown>("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
-      text: formatted.text,
-      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
+      text,
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   }
