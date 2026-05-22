@@ -59,6 +59,10 @@ PI_TELEGRAM_TMP=~/.pi/agent/tmp/telegram-agent
 PI_TELEGRAM_CWD=~
 ```
 
+`PI_TELEGRAM_TMP` controls where files downloaded from Telegram are stored before being passed to Pi. If unset, it defaults to `~/.pi/agent/tmp/telegram-agent`.
+
+`PI_TELEGRAM_CWD` controls the working directory for the Pi agent session, including where commands run and how relative paths are resolved. If unset, it defaults to the directory where this process is started.
+
 ## Typecheck
 
 ```bash
