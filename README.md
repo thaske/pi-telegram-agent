@@ -21,6 +21,7 @@ systemd → bun run src/main.ts → Pi AgentSessionRuntime
   - `/model`
   - `/stop`
   - `/help`
+- Starts by continuing the most recent Pi session for `PI_TELEGRAM_CWD`, so systemd restarts keep chat history.
 - `/new` calls `AgentSessionRuntime.newSession()` directly; no fake terminal or `screen` required.
 - `/model` opens a Telegram inline keyboard to select or search any authenticated Pi model, sorted by OpenRouter weekly popularity when available.
 - Streams assistant previews back to Telegram.

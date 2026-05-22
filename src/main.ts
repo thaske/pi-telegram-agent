@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   runtime = await createAgentSessionRuntime(createRuntime, {
     cwd: CWD,
     agentDir: getAgentDir(),
-    sessionManager: SessionManager.create(CWD),
+    sessionManager: SessionManager.continueRecent(CWD),
   });
   bridge.setRuntime(runtime);
   runtime.setRebindSession(async () => bridge!.bindSession());
