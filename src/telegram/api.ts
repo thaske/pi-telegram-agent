@@ -10,6 +10,7 @@ import type {
   TelegramSentMessage,
 } from "./types.js";
 import { chunkParagraphs, sanitizeFileName } from "../utils.js";
+import { formatTelegramText } from "./format.js";
 
 export class TelegramApi {
   constructor(private readonly getConfig: () => TelegramConfig) {}
@@ -114,9 +115,11 @@ export class TelegramApi {
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<TelegramSentMessage> {
+    const formatted = formatTelegramText(text);
     return await this.call<TelegramSentMessage>("sendMessage", {
       chat_id: chatId,
-      text,
+      text: formatted.text,
+      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   }
@@ -127,10 +130,12 @@ export class TelegramApi {
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<void> {
+    const formatted = formatTelegramText(text);
     await this.call<unknown>("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
-      text,
+      text: formatted.text,
+      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   }
