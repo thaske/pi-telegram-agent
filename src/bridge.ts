@@ -42,6 +42,8 @@ export class TelegramBridge {
   private activeTelegramTurn: PendingTelegramTurn | undefined;
   private preserveQueuedTurnsAsHistory = false;
   private mediaGroups = new Map<string, TelegramMediaGroupState>();
+  private pendingModelSearchChats = new Set<number>();
+  private modelPickerQueries = new Map<number, string>();
 
   constructor(
     private readonly config: TelegramConfig,
@@ -216,6 +218,26 @@ export class TelegramBridge {
       messages.map((m) => (m.text || m.caption || "").trim()).find(Boolean) ||
       "";
     const lower = rawText.toLowerCase();
+    if (
+      this.pendingModelSearchChats.has(firstMessage.chat.id) &&
+      !lower.startsWith("/")
+    ) {
+      this.pendingModelSearchChats.delete(firstMessage.chat.id);
+      if (session.isStreaming) {
+        await this.api.sendTextReply(
+          firstMessage.chat.id,
+          firstMessage.message_id,
+          "Cannot change models while pi is busy. Send /stop first.",
+        );
+        return;
+      }
+      await this.showFilteredModelPicker(
+        firstMessage.chat.id,
+        firstMessage.message_id,
+        rawText,
+      );
+      return;
+    }
     if (lower === "stop" || lower === "/stop") {
       if (session.isStreaming) {
         if (this.queuedTelegramTurns.length)
@@ -376,16 +398,28 @@ export class TelegramBridge {
     await this.dispatchAuthorizedTelegramMessages([message]);
   }
 
-  private getAvailableModels() {
+  private getAvailableModels(query?: string) {
+    const normalized = query?.trim().toLowerCase();
     return this.requireSession()
       .modelRegistry.getAvailable()
+      .filter((model) => {
+        if (!normalized) return true;
+        return [model.provider, model.id, model.name, `${model.provider}/${model.id}`]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalized);
+      })
       .sort((a, b) =>
         `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
       );
   }
 
-  private modelPickerMarkup(page: number): TelegramInlineKeyboardMarkup {
-    const models = this.getAvailableModels();
+  private modelPickerMarkup(
+    chatId: number,
+    page: number,
+  ): TelegramInlineKeyboardMarkup {
+    const activeQuery = this.modelPickerQueries.get(chatId);
+    const models = this.getAvailableModels(activeQuery);
     const pageSize = 8;
     const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
     const safePage = Math.min(Math.max(page, 0), pageCount - 1);
@@ -403,6 +437,12 @@ export class TelegramBridge {
           },
         ];
       });
+    rows.push([
+      { text: "🔎 Search", callback_data: "model:search" },
+      ...(activeQuery
+        ? [{ text: "Clear", callback_data: "model:clear" }]
+        : []),
+    ]);
     if (pageCount > 1) {
       rows.push([
         {
@@ -419,12 +459,18 @@ export class TelegramBridge {
     return { inline_keyboard: rows };
   }
 
-  private modelPickerText(): string {
+  private modelPickerText(chatId: number): string {
     const session = this.requireSession();
     const current = session.model
       ? `${session.model.provider}/${session.model.id}`
       : "unknown";
-    return `Choose a Pi model. Current: ${current}`;
+    const activeQuery = this.modelPickerQueries.get(chatId);
+    return [
+      `Choose a Pi model. Current: ${current}`,
+      activeQuery ? `Search: ${activeQuery}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   private async showModelPicker(
@@ -442,14 +488,41 @@ export class TelegramBridge {
     }
     await this.api.sendMessage(
       chatId,
-      this.modelPickerText(),
-      this.modelPickerMarkup(page),
+      this.modelPickerText(chatId),
+      this.modelPickerMarkup(chatId, page),
     );
   }
 
-  private async selectModelByIndex(index: number): Promise<string> {
+  private async showFilteredModelPicker(
+    chatId: number,
+    replyToMessageId: number,
+    query: string,
+  ): Promise<void> {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      this.modelPickerQueries.delete(chatId);
+      await this.showModelPicker(chatId, replyToMessageId);
+      return;
+    }
+    const matches = this.getAvailableModels(trimmed);
+    if (matches.length === 0) {
+      await this.api.sendTextReply(
+        chatId,
+        replyToMessageId,
+        `No available model matched "${trimmed}". Try another search or send /model.`,
+      );
+      return;
+    }
+    this.modelPickerQueries.set(chatId, trimmed);
+    await this.showModelPicker(chatId, replyToMessageId);
+  }
+
+  private async selectModelByIndex(
+    chatId: number,
+    index: number,
+  ): Promise<string> {
     const session = this.requireSession();
-    const model = this.getAvailableModels()[index];
+    const model = this.getAvailableModels(this.modelPickerQueries.get(chatId))[index];
     if (!model) return "That model selection is no longer available.";
     await session.setModel(model);
     return `Model changed to ${model.provider}/${model.id}.`;
@@ -460,28 +533,30 @@ export class TelegramBridge {
     replyToMessageId: number,
     query: string,
   ): Promise<void> {
-    const models = this.getAvailableModels();
     const normalized = query.toLowerCase();
-    const matches = models.filter((model) => {
-      const key = `${model.provider}/${model.id}`.toLowerCase();
-      return key === normalized || key.includes(normalized);
-    });
-    if (matches.length !== 1) {
+    const allMatches = this.getAvailableModels(query);
+    const exact = allMatches.find(
+      (model) => `${model.provider}/${model.id}`.toLowerCase() === normalized,
+    );
+    if (exact) {
+      await this.requireSession().setModel(exact);
       await this.api.sendTextReply(
         chatId,
         replyToMessageId,
-        matches.length === 0
-          ? `No available model matched "${query}". Send /model to choose from a list.`
-          : `Multiple models matched "${query}". Send /model to choose from a list.`,
+        `Model changed to ${exact.provider}/${exact.id}.`,
       );
       return;
     }
-    await this.requireSession().setModel(matches[0]!);
-    await this.api.sendTextReply(
-      chatId,
-      replyToMessageId,
-      `Model changed to ${matches[0]!.provider}/${matches[0]!.id}.`,
-    );
+    if (allMatches.length === 1) {
+      await this.requireSession().setModel(allMatches[0]!);
+      await this.api.sendTextReply(
+        chatId,
+        replyToMessageId,
+        `Model changed to ${allMatches[0]!.provider}/${allMatches[0]!.id}.`,
+      );
+      return;
+    }
+    await this.showFilteredModelPicker(chatId, replyToMessageId, query);
   }
 
   private async handleAuthorizedCallbackQuery(
@@ -502,13 +577,36 @@ export class TelegramBridge {
       await this.api.answerCallbackQuery(query.id);
       return;
     }
+    if (action === "search") {
+      this.pendingModelSearchChats.add(message.chat.id);
+      await this.api.answerCallbackQuery(query.id, "Send search terms");
+      await this.api.sendMessage(
+        message.chat.id,
+        "Send model search terms, e.g. `opus`, `gpt`, `anthropic`, or `gemini`.",
+      );
+      return;
+    }
+    if (action === "clear") {
+      this.modelPickerQueries.delete(message.chat.id);
+      await this.api.editMessageText(
+        message.chat.id,
+        message.message_id,
+        this.modelPickerText(message.chat.id),
+        this.modelPickerMarkup(message.chat.id, 0),
+      );
+      await this.api.answerCallbackQuery(query.id, "Search cleared");
+      return;
+    }
     if (action === "page") {
       const page = Number(value ?? 0);
       await this.api.editMessageText(
         message.chat.id,
         message.message_id,
-        this.modelPickerText(),
-        this.modelPickerMarkup(Number.isFinite(page) ? page : 0),
+        this.modelPickerText(message.chat.id),
+        this.modelPickerMarkup(
+          message.chat.id,
+          Number.isFinite(page) ? page : 0,
+        ),
       );
       await this.api.answerCallbackQuery(query.id);
       return;
@@ -516,8 +614,10 @@ export class TelegramBridge {
     if (action === "set") {
       const index = Number(value);
       const text = await this.selectModelByIndex(
+        message.chat.id,
         Number.isFinite(index) ? index : -1,
       );
+      this.modelPickerQueries.delete(message.chat.id);
       await this.api.editMessageText(message.chat.id, message.message_id, text);
       await this.api.answerCallbackQuery(query.id, text);
     }
