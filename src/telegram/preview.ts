@@ -105,10 +105,7 @@ export class TelegramPreviewManager {
       return false;
     }
     if (state.mode === "draft") {
-      await this.api.call<TelegramSentMessage>("sendMessage", {
-        chat_id: chatId,
-        text: finalText,
-      });
+      await this.api.sendMessage(chatId, finalText);
       await this.clear(chatId);
       return true;
     }
@@ -158,20 +155,13 @@ export class TelegramPreviewManager {
       }
     }
     if (state.messageId === undefined) {
-      const sent = await this.api.call<TelegramSentMessage>("sendMessage", {
-        chat_id: chatId,
-        text: truncated,
-      });
+      const sent = await this.api.sendMessage(chatId, truncated);
       state.messageId = sent.message_id;
       state.mode = "message";
       state.lastSentText = truncated;
       return;
     }
-    await this.api.call("editMessageText", {
-      chat_id: chatId,
-      message_id: state.messageId,
-      text: truncated,
-    });
+    await this.api.editMessageText(chatId, state.messageId, truncated);
     state.mode = "message";
     state.lastSentText = truncated;
   }
