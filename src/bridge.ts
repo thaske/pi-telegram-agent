@@ -124,9 +124,7 @@ export class TelegramBridge {
     await this.api.configureCommands(signal);
     if (this.config.lastUpdateId === undefined) {
       const updates = await this.api
-        .call<
-          TelegramUpdate[]
-        >("getUpdates", { offset: -1, limit: 1, timeout: 0 }, { signal })
+        .getUpdates({ offset: -1, limit: 1, timeout: 0 }, signal)
         .catch(() => []);
       const last = updates.at(-1);
       if (last) {
@@ -137,8 +135,7 @@ export class TelegramBridge {
     log("telegram polling started");
     while (!signal.aborted) {
       try {
-        const updates = await this.api.call<TelegramUpdate[]>(
-          "getUpdates",
+        const updates = await this.api.getUpdates(
           {
             offset:
               this.config.lastUpdateId !== undefined
@@ -148,7 +145,7 @@ export class TelegramBridge {
             timeout: 30,
             allowed_updates: ["message", "edited_message"],
           },
-          { signal },
+          signal,
         );
         for (const update of updates) {
           this.config.lastUpdateId = update.update_id;

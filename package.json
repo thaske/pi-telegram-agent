@@ -5,7 +5,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.75.4"
+    "@earendil-works/pi-coding-agent": "0.75.4",
+    "grammy": "^1.43.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
