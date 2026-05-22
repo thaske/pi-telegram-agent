@@ -59,6 +59,7 @@ Optional environment variables:
 PI_TELEGRAM_CONFIG=~/.pi/agent/telegram.json
 PI_TELEGRAM_TMP=~/.pi/agent/tmp/telegram-agent
 PI_TELEGRAM_CWD=~
+EXA_API_KEY=...
 ```
 
 `PI_TELEGRAM_TMP` controls where files downloaded from Telegram are stored before being passed to Pi. If unset, it defaults to `~/.pi/agent/tmp/telegram-agent`.
@@ -84,12 +85,22 @@ Type=simple
 WorkingDirectory=%h/Git/pi-telegram-agent
 Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PI_TELEGRAM_CWD=%h
+# Optional: load secrets/env vars needed by Pi skills/tools, such as EXA_API_KEY.
+EnvironmentFile=-%h/.pi/agent/telegram-agent.env
 ExecStart=%h/.bun/bin/bun run src/main.ts
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=default.target
+```
+
+If you need API keys from your shell (for example `EXA_API_KEY`), do not rely on `~/.zshrc`: systemd services do not load interactive shell startup files. Put them in the env file referenced above instead:
+
+```bash
+mkdir -p ~/.pi/agent
+printf 'EXA_API_KEY=%s\n' 'your-key-here' > ~/.pi/agent/telegram-agent.env
+chmod 600 ~/.pi/agent/telegram-agent.env
 ```
 
 Then:
