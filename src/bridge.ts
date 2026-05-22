@@ -14,6 +14,7 @@ import {
   getMessageText,
   isAssistantMessage,
 } from "./pi/session-messages.js";
+import { getOpenRouterPopularityRanks } from "./openrouter-rankings.js";
 import { createTelegramAttachTool } from "./pi/telegram-attach-tool.js";
 import { TelegramApi } from "./telegram/api.js";
 import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files.js";
@@ -398,8 +399,9 @@ export class TelegramBridge {
     await this.dispatchAuthorizedTelegramMessages([message]);
   }
 
-  private getAvailableModels(query?: string) {
+  private async getAvailableModels(query?: string) {
     const normalized = query?.trim().toLowerCase();
+    const ranks = await getOpenRouterPopularityRanks().catch(() => undefined);
     return this.requireSession()
       .modelRegistry.getAvailable()
       .filter((model) => {
@@ -409,17 +411,36 @@ export class TelegramBridge {
           .toLowerCase()
           .includes(normalized);
       })
-      .sort((a, b) =>
-        `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
-      );
+      .sort((a, b) => {
+        const rankA = this.getOpenRouterRank(a, ranks);
+        const rankB = this.getOpenRouterRank(b, ranks);
+        if (rankA !== rankB) return rankA - rankB;
+        return `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`);
+      });
   }
 
-  private modelPickerMarkup(
+  private getOpenRouterRank(
+    model: { provider: string; id: string },
+    ranks: Map<string, number> | undefined,
+  ): number {
+    if (!ranks) return Number.MAX_SAFE_INTEGER;
+    const keys =
+      model.provider === "openrouter"
+        ? [model.id]
+        : [`${model.provider}/${model.id}`];
+    for (const key of keys) {
+      const rank = ranks.get(key.toLowerCase());
+      if (rank !== undefined) return rank;
+    }
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  private async modelPickerMarkup(
     chatId: number,
     page: number,
-  ): TelegramInlineKeyboardMarkup {
+  ): Promise<TelegramInlineKeyboardMarkup> {
     const activeQuery = this.modelPickerQueries.get(chatId);
-    const models = this.getAvailableModels(activeQuery);
+    const models = await this.getAvailableModels(activeQuery);
     const pageSize = 8;
     const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
     const safePage = Math.min(Math.max(page, 0), pageCount - 1);
@@ -478,7 +499,7 @@ export class TelegramBridge {
     replyToMessageId: number,
     page = 0,
   ): Promise<void> {
-    if (this.getAvailableModels().length === 0) {
+    if ((await this.getAvailableModels()).length === 0) {
       await this.api.sendTextReply(
         chatId,
         replyToMessageId,
@@ -489,7 +510,7 @@ export class TelegramBridge {
     await this.api.sendMessage(
       chatId,
       this.modelPickerText(chatId),
-      this.modelPickerMarkup(chatId, page),
+      await this.modelPickerMarkup(chatId, page),
     );
   }
 
@@ -504,7 +525,7 @@ export class TelegramBridge {
       await this.showModelPicker(chatId, replyToMessageId);
       return;
     }
-    const matches = this.getAvailableModels(trimmed);
+    const matches = await this.getAvailableModels(trimmed);
     if (matches.length === 0) {
       await this.api.sendTextReply(
         chatId,
@@ -522,7 +543,9 @@ export class TelegramBridge {
     index: number,
   ): Promise<string> {
     const session = this.requireSession();
-    const model = this.getAvailableModels(this.modelPickerQueries.get(chatId))[index];
+    const model = (await this.getAvailableModels(this.modelPickerQueries.get(chatId)))[
+      index
+    ];
     if (!model) return "That model selection is no longer available.";
     await session.setModel(model);
     return `Model changed to ${model.provider}/${model.id}.`;
@@ -534,7 +557,7 @@ export class TelegramBridge {
     query: string,
   ): Promise<void> {
     const normalized = query.toLowerCase();
-    const allMatches = this.getAvailableModels(query);
+    const allMatches = await this.getAvailableModels(query);
     const exact = allMatches.find(
       (model) => `${model.provider}/${model.id}`.toLowerCase() === normalized,
     );
@@ -592,7 +615,7 @@ export class TelegramBridge {
         message.chat.id,
         message.message_id,
         this.modelPickerText(message.chat.id),
-        this.modelPickerMarkup(message.chat.id, 0),
+        await this.modelPickerMarkup(message.chat.id, 0),
       );
       await this.api.answerCallbackQuery(query.id, "Search cleared");
       return;
@@ -603,7 +626,7 @@ export class TelegramBridge {
         message.chat.id,
         message.message_id,
         this.modelPickerText(message.chat.id),
-        this.modelPickerMarkup(
+        await this.modelPickerMarkup(
           message.chat.id,
           Number.isFinite(page) ? page : 0,
         ),
