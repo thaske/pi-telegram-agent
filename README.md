@@ -2,14 +2,6 @@
 
 Standalone Telegram frontend for Pi using the `@earendil-works/pi-coding-agent` SDK.
 
-This replaces the older setup:
-
-```text
-systemd → screen → interactive pi → pi-telegram extension
-```
-
-with:
-
 ```text
 systemd → bun run src/main.ts → Pi AgentSessionRuntime
 ```
