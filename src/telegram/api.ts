@@ -9,8 +9,8 @@ import type {
   TelegramInlineKeyboardMarkup,
   TelegramSentMessage,
 } from "./types.js";
-import { chunkParagraphs, sanitizeFileName } from "../utils.js";
-import { formatTelegramText } from "./format.js";
+import { sanitizeFileName } from "../utils.js";
+import { chunkFormattedTelegramText, formatTelegramText } from "./format.js";
 
 export class TelegramApi {
   constructor(private readonly getConfig: () => TelegramConfig) {}
@@ -103,8 +103,8 @@ export class TelegramApi {
     text: string,
   ): Promise<number | undefined> {
     let lastMessageId: number | undefined;
-    for (const chunk of chunkParagraphs(text)) {
-      const sent = await this.sendMessage(chatId, chunk);
+    for (const chunk of chunkFormattedTelegramText(text)) {
+      const sent = await this.sendMessageRaw(chatId, chunk.text, chunk.parseMode);
       lastMessageId = sent.message_id;
     }
     return lastMessageId;
@@ -116,10 +116,24 @@ export class TelegramApi {
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<TelegramSentMessage> {
     const formatted = formatTelegramText(text);
+    return await this.sendMessageRaw(
+      chatId,
+      formatted.text,
+      formatted.parseMode,
+      replyMarkup,
+    );
+  }
+
+  private async sendMessageRaw(
+    chatId: number,
+    text: string,
+    parseMode?: "HTML",
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<TelegramSentMessage> {
     return await this.call<TelegramSentMessage>("sendMessage", {
       chat_id: chatId,
-      text: formatted.text,
-      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
+      text,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   }

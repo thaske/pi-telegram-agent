@@ -1,3 +1,6 @@
+import { MAX_MESSAGE_LENGTH } from "../constants.js";
+import { chunkParagraphs } from "../utils.js";
+
 export interface FormattedTelegramText {
   text: string;
   parseMode?: "HTML";
@@ -115,4 +118,67 @@ export function formatTelegramText(text: string): FormattedTelegramText {
 
   if (!changed) return { text };
   return { text: output.join("\n"), parseMode: "HTML" };
+}
+
+function chunkPreBlock(preBlock: string): FormattedTelegramText[] {
+  const content = preBlock.replace(/^<pre>/u, "").replace(/<\/pre>$/u, "");
+  const lines = content.split("\n");
+  const chunks: FormattedTelegramText[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    if (!current.length) return;
+    chunks.push({ text: `<pre>${current.join("\n")}</pre>`, parseMode: "HTML" });
+    current = [];
+  };
+  for (const line of lines) {
+    const candidate = [...current, line];
+    if (`<pre>${candidate.join("\n")}</pre>`.length <= MAX_MESSAGE_LENGTH) {
+      current = candidate;
+      continue;
+    }
+    flush();
+    if (`<pre>${line}</pre>`.length <= MAX_MESSAGE_LENGTH) current = [line];
+    else {
+      for (let start = 0; start < line.length; start += MAX_MESSAGE_LENGTH - 32)
+        chunks.push({
+          text: `<pre>${line.slice(start, start + MAX_MESSAGE_LENGTH - 32)}</pre>`,
+          parseMode: "HTML",
+        });
+    }
+  }
+  flush();
+  return chunks;
+}
+
+export function chunkFormattedTelegramText(text: string): FormattedTelegramText[] {
+  const formatted = formatTelegramText(text);
+  if (!formatted.parseMode)
+    return chunkParagraphs(text).map((chunk) => ({ text: chunk }));
+  if (formatted.text.length <= MAX_MESSAGE_LENGTH) return [formatted];
+
+  const chunks: FormattedTelegramText[] = [];
+  const preRegex = /<pre>[\s\S]*?<\/pre>/gu;
+  let cursor = 0;
+  for (const match of formatted.text.matchAll(preRegex)) {
+    const index = match.index ?? 0;
+    const before = formatted.text.slice(cursor, index);
+    if (before.trim())
+      chunks.push(
+        ...chunkParagraphs(before).map((chunk) => ({
+          text: chunk,
+          parseMode: "HTML" as const,
+        })),
+      );
+    chunks.push(...chunkPreBlock(match[0]));
+    cursor = index + match[0].length;
+  }
+  const after = formatted.text.slice(cursor);
+  if (after.trim())
+    chunks.push(
+      ...chunkParagraphs(after).map((chunk) => ({
+        text: chunk,
+        parseMode: "HTML" as const,
+      })),
+    );
+  return chunks.length ? chunks : [formatted];
 }
