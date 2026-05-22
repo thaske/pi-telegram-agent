@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { CONFIG_PATH } from "./constants.js";
-import type { TelegramConfig } from "./types.js";
+import type { TelegramConfig } from "./telegram/types.js";
 
 export async function readConfig(): Promise<TelegramConfig> {
   try {

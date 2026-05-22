@@ -9,22 +9,22 @@ import {
   TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS,
 } from "./constants.js";
 import { log } from "./logger.js";
-import { TelegramPreviewManager } from "./preview.js";
 import {
   extractAssistantText,
   getMessageText,
   isAssistantMessage,
-} from "./session-messages.js";
-import { TelegramApi } from "./telegram-api.js";
-import { createTelegramAttachTool } from "./telegram-attach-tool.js";
-import { createTelegramTurn, sendQueuedAttachments } from "./telegram-files.js";
+} from "./pi/session-messages.js";
+import { createTelegramAttachTool } from "./pi/telegram-attach-tool.js";
+import { TelegramApi } from "./telegram/api.js";
+import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files.js";
+import { TelegramPreviewManager } from "./telegram/preview.js";
 import type {
   PendingTelegramTurn,
   TelegramConfig,
   TelegramMediaGroupState,
   TelegramMessage,
   TelegramUpdate,
-} from "./types.js";
+} from "./telegram/types.js";
 
 type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 

@@ -1,14 +1,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { TEMP_DIR } from "./constants.js";
+import { TEMP_DIR } from "../constants.js";
 import type {
   TelegramApiResponse,
   TelegramConfig,
   TelegramGetFileResult,
   TelegramSentMessage,
 } from "./types.js";
-import { chunkParagraphs, sanitizeFileName } from "./utils.js";
+import { chunkParagraphs, sanitizeFileName } from "../utils.js";
 
 export class TelegramApi {
   constructor(private readonly getConfig: () => TelegramConfig) {}

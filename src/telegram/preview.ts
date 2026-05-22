@@ -2,9 +2,9 @@ import {
   MAX_MESSAGE_LENGTH,
   PREVIEW_THROTTLE_MS,
   TELEGRAM_DRAFT_ID_MAX,
-} from "./constants.js";
-import { log } from "./logger.js";
-import { TelegramApi } from "./telegram-api.js";
+} from "../constants.js";
+import { log } from "../logger.js";
+import { TelegramApi } from "./api.js";
 import type { TelegramPreviewState, TelegramSentMessage } from "./types.js";
 
 export class TelegramPreviewManager {
