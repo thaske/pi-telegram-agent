@@ -6,6 +6,7 @@ import type {
   TelegramApiResponse,
   TelegramConfig,
   TelegramGetFileResult,
+  TelegramInlineKeyboardMarkup,
   TelegramSentMessage,
 } from "./types.js";
 import { chunkParagraphs, sanitizeFileName } from "../utils.js";
@@ -65,6 +66,7 @@ export class TelegramApi {
         commands: [
           { command: "new", description: "Start a new Pi chat" },
           { command: "status", description: "Show model, usage, and context" },
+          { command: "model", description: "Choose the active Pi model" },
           { command: "compact", description: "Compact the current Pi chat" },
           { command: "stop", description: "Abort the active Pi turn" },
           { command: "help", description: "Show Telegram bridge help" },
@@ -101,12 +103,45 @@ export class TelegramApi {
   ): Promise<number | undefined> {
     let lastMessageId: number | undefined;
     for (const chunk of chunkParagraphs(text)) {
-      const sent = await this.call<TelegramSentMessage>("sendMessage", {
-        chat_id: chatId,
-        text: chunk,
-      });
+      const sent = await this.sendMessage(chatId, chunk);
       lastMessageId = sent.message_id;
     }
     return lastMessageId;
+  }
+
+  async sendMessage(
+    chatId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<TelegramSentMessage> {
+    return await this.call<TelegramSentMessage>("sendMessage", {
+      chat_id: chatId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
+
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<void> {
+    await this.call<unknown>("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
+
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    text?: string,
+  ): Promise<void> {
+    await this.call<boolean>("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {}),
+    });
   }
 }

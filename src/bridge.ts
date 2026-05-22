@@ -20,7 +20,9 @@ import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files.js";
 import { TelegramPreviewManager } from "./telegram/preview.js";
 import type {
   PendingTelegramTurn,
+  TelegramCallbackQuery,
   TelegramConfig,
+  TelegramInlineKeyboardMarkup,
   TelegramMediaGroupState,
   TelegramMessage,
   TelegramUpdate,
@@ -146,7 +148,7 @@ export class TelegramBridge {
                 : undefined,
             limit: 10,
             timeout: 30,
-            allowed_updates: ["message", "edited_message"],
+            allowed_updates: ["message", "edited_message", "callback_query"],
           },
           { signal },
         );
@@ -259,6 +261,35 @@ export class TelegramBridge {
       await this.bindSession();
       return;
     }
+    if (lower === "/model" || lower === "model") {
+      if (session.isStreaming) {
+        await this.api.sendTextReply(
+          firstMessage.chat.id,
+          firstMessage.message_id,
+          "Cannot change models while pi is busy. Send /stop first.",
+        );
+        return;
+      }
+      await this.showModelPicker(firstMessage.chat.id, firstMessage.message_id);
+      return;
+    }
+    if (lower.startsWith("/model ") || lower.startsWith("model ")) {
+      if (session.isStreaming) {
+        await this.api.sendTextReply(
+          firstMessage.chat.id,
+          firstMessage.message_id,
+          "Cannot change models while pi is busy. Send /stop first.",
+        );
+        return;
+      }
+      const query = rawText.replace(/^\/?model\s+/i, "").trim();
+      await this.selectModelByQuery(
+        firstMessage.chat.id,
+        firstMessage.message_id,
+        query,
+      );
+      return;
+    }
     if (lower === "/compact") {
       if (session.isStreaming) {
         await this.api.sendTextReply(
@@ -312,7 +343,7 @@ export class TelegramBridge {
       await this.api.sendTextReply(
         firstMessage.chat.id,
         firstMessage.message_id,
-        "Send me a message and I will forward it to Pi. Commands: /new, /status, /compact, /stop, /help.",
+        "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop, /help.",
       );
       return;
     }
@@ -345,7 +376,172 @@ export class TelegramBridge {
     await this.dispatchAuthorizedTelegramMessages([message]);
   }
 
+  private getAvailableModels() {
+    return this.requireSession()
+      .modelRegistry.getAvailable()
+      .sort((a, b) =>
+        `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
+      );
+  }
+
+  private modelPickerMarkup(page: number): TelegramInlineKeyboardMarkup {
+    const models = this.getAvailableModels();
+    const pageSize = 8;
+    const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
+    const safePage = Math.min(Math.max(page, 0), pageCount - 1);
+    const current = this.requireSession().model;
+    const rows = models
+      .slice(safePage * pageSize, safePage * pageSize + pageSize)
+      .map((model, i) => {
+        const index = safePage * pageSize + i;
+        const selected =
+          current?.provider === model.provider && current?.id === model.id;
+        return [
+          {
+            text: `${selected ? "✓ " : ""}${model.name} (${model.provider})`,
+            callback_data: `model:set:${index}`,
+          },
+        ];
+      });
+    if (pageCount > 1) {
+      rows.push([
+        {
+          text: "‹ Prev",
+          callback_data: `model:page:${(safePage - 1 + pageCount) % pageCount}`,
+        },
+        { text: `${safePage + 1}/${pageCount}`, callback_data: "model:noop" },
+        {
+          text: "Next ›",
+          callback_data: `model:page:${(safePage + 1) % pageCount}`,
+        },
+      ]);
+    }
+    return { inline_keyboard: rows };
+  }
+
+  private modelPickerText(): string {
+    const session = this.requireSession();
+    const current = session.model
+      ? `${session.model.provider}/${session.model.id}`
+      : "unknown";
+    return `Choose a Pi model. Current: ${current}`;
+  }
+
+  private async showModelPicker(
+    chatId: number,
+    replyToMessageId: number,
+    page = 0,
+  ): Promise<void> {
+    if (this.getAvailableModels().length === 0) {
+      await this.api.sendTextReply(
+        chatId,
+        replyToMessageId,
+        "No authenticated models are available in Pi config.",
+      );
+      return;
+    }
+    await this.api.sendMessage(
+      chatId,
+      this.modelPickerText(),
+      this.modelPickerMarkup(page),
+    );
+  }
+
+  private async selectModelByIndex(index: number): Promise<string> {
+    const session = this.requireSession();
+    const model = this.getAvailableModels()[index];
+    if (!model) return "That model selection is no longer available.";
+    await session.setModel(model);
+    return `Model changed to ${model.provider}/${model.id}.`;
+  }
+
+  private async selectModelByQuery(
+    chatId: number,
+    replyToMessageId: number,
+    query: string,
+  ): Promise<void> {
+    const models = this.getAvailableModels();
+    const normalized = query.toLowerCase();
+    const matches = models.filter((model) => {
+      const key = `${model.provider}/${model.id}`.toLowerCase();
+      return key === normalized || key.includes(normalized);
+    });
+    if (matches.length !== 1) {
+      await this.api.sendTextReply(
+        chatId,
+        replyToMessageId,
+        matches.length === 0
+          ? `No available model matched "${query}". Send /model to choose from a list.`
+          : `Multiple models matched "${query}". Send /model to choose from a list.`,
+      );
+      return;
+    }
+    await this.requireSession().setModel(matches[0]!);
+    await this.api.sendTextReply(
+      chatId,
+      replyToMessageId,
+      `Model changed to ${matches[0]!.provider}/${matches[0]!.id}.`,
+    );
+  }
+
+  private async handleAuthorizedCallbackQuery(
+    query: TelegramCallbackQuery,
+  ): Promise<void> {
+    const data = query.data ?? "";
+    const message = query.message;
+    if (!message || !data.startsWith("model:")) return;
+    if (this.requireSession().isStreaming) {
+      await this.api.answerCallbackQuery(
+        query.id,
+        "Pi is busy. Send /stop first.",
+      );
+      return;
+    }
+    const [, action, value] = data.split(":");
+    if (action === "noop") {
+      await this.api.answerCallbackQuery(query.id);
+      return;
+    }
+    if (action === "page") {
+      const page = Number(value ?? 0);
+      await this.api.editMessageText(
+        message.chat.id,
+        message.message_id,
+        this.modelPickerText(),
+        this.modelPickerMarkup(Number.isFinite(page) ? page : 0),
+      );
+      await this.api.answerCallbackQuery(query.id);
+      return;
+    }
+    if (action === "set") {
+      const index = Number(value);
+      const text = await this.selectModelByIndex(
+        Number.isFinite(index) ? index : -1,
+      );
+      await this.api.editMessageText(message.chat.id, message.message_id, text);
+      await this.api.answerCallbackQuery(query.id, text);
+    }
+  }
+
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
+    const callbackQuery = update.callback_query;
+    if (callbackQuery) {
+      if (callbackQuery.from.is_bot) return;
+      if (this.config.allowedUserId === undefined) {
+        this.config.allowedUserId = callbackQuery.from.id;
+        await this.saveConfig(this.config);
+      }
+      if (callbackQuery.from.id !== this.config.allowedUserId) {
+        await this.api.answerCallbackQuery(
+          callbackQuery.id,
+          "This bot is not authorized for your account.",
+        );
+        return;
+      }
+      await this.handleAuthorizedCallbackQuery(callbackQuery);
+      return;
+    }
+
     const message = update.message || update.edited_message;
     if (
       !message ||

@@ -18,9 +18,11 @@ systemd → bun run src/main.ts → Pi AgentSessionRuntime
   - `/new`
   - `/status`
   - `/compact`
+  - `/model`
   - `/stop`
   - `/help`
 - `/new` calls `AgentSessionRuntime.newSession()` directly; no fake terminal or `screen` required.
+- `/model` opens a Telegram inline keyboard to select any authenticated Pi model.
 - Streams assistant previews back to Telegram.
 - Supports Telegram image/file downloads.
 - Provides a `telegram_attach` tool so Pi can send generated files back to Telegram.
