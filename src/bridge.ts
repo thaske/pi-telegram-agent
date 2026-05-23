@@ -717,39 +717,56 @@ export class TelegramBridge {
         const doneTurn = this.activeTelegramTurn;
         this.preview.stopTypingLoop();
         this.activeTelegramTurn = undefined;
-        if (!doneTurn) return;
-        const assistant = extractAssistantText(event.messages);
-        if (assistant.stopReason === "aborted") {
-          await this.preview.clear(doneTurn.chatId);
+        if (!doneTurn) {
           void this.startNextTurnIfIdle();
           return;
         }
-        if (assistant.stopReason === "error") {
-          await this.preview.clear(doneTurn.chatId);
-          await this.api.sendTextReply(
-            doneTurn.chatId,
-            doneTurn.replyToMessageId,
-            assistant.errorMessage || "Pi failed while processing the request.",
-          );
-          void this.startNextTurnIfIdle();
-          return;
-        }
-        const finalText = assistant.text;
-        if (this.preview.hasPreview)
-          this.preview.pendingText =
-            finalText ?? this.preview.pendingText ?? "";
-        if (finalText && finalText.length <= MAX_MESSAGE_LENGTH)
-          await this.preview.finalize(doneTurn.chatId);
-        else {
-          await this.preview.clear(doneTurn.chatId);
-          if (finalText)
+        try {
+          const assistant = extractAssistantText(event.messages);
+          if (assistant.stopReason === "aborted") {
+            await this.preview.clear(doneTurn.chatId);
+            void this.startNextTurnIfIdle();
+            return;
+          }
+          if (assistant.stopReason === "error") {
+            await this.preview.clear(doneTurn.chatId);
             await this.api.sendTextReply(
               doneTurn.chatId,
               doneTurn.replyToMessageId,
-              finalText,
+              assistant.errorMessage || "Pi failed while processing the request.",
             );
+            void this.startNextTurnIfIdle();
+            return;
+          }
+          const finalText = assistant.text;
+          if (this.preview.hasPreview)
+            this.preview.pendingText =
+              finalText ?? this.preview.pendingText ?? "";
+          if (finalText && finalText.length <= MAX_MESSAGE_LENGTH)
+            await this.preview.finalize(doneTurn.chatId);
+          else {
+            await this.preview.clear(doneTurn.chatId);
+            if (finalText)
+              await this.api.sendTextReply(
+                doneTurn.chatId,
+                doneTurn.replyToMessageId,
+                finalText,
+              );
+          }
+          await sendQueuedAttachments(this.api, doneTurn);
+        } catch (error) {
+          log(
+            `agent_end send error: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          await this.preview.clear(doneTurn.chatId).catch(() => undefined);
+          await this.api
+            .sendTextReply(
+              doneTurn.chatId,
+              doneTurn.replyToMessageId,
+              `Failed to send response: ${error instanceof Error ? error.message : String(error)}`,
+            )
+            .catch(() => undefined);
         }
-        await sendQueuedAttachments(this.api, doneTurn);
         void this.startNextTurnIfIdle();
       })();
     }

@@ -28,6 +28,7 @@ export function formatTelegramText(text: string): FormattedTelegramText {
   const replacements: string[] = [];
   let formatted = text;
 
+  // Protect code blocks and inline code from further processing
   formatted = stash(
     formatted,
     /```(?:[a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g,
@@ -42,31 +43,45 @@ export function formatTelegramText(text: string): FormattedTelegramText {
   );
   formatted = htmlEscape(formatted);
 
+  // Block-level formatting
   formatted = formatted.replace(
     /^#{1,6}\s+(.+)$/gm,
     (_match, heading: string) => `<b>${heading}</b>`,
   );
-  formatted = formatted.replace(
-    /\*\*([^*\n][\s\S]*?[^*\n])\*\*/g,
-    "<b>$1</b>",
-  );
-  formatted = formatted.replace(
-    /__([^_\n][\s\S]*?[^_\n])__/g,
-    "<b>$1</b>",
-  );
-  formatted = formatted.replace(
-    /(^|[^*])\*([^*\n][^*\n]*?[^*\n])\*(?!\*)/g,
-    "$1<i>$2</i>",
-  );
-  formatted = formatted.replace(
-    /(^|[^_])_([^_\n][^_\n]*?[^_\n])_(?!_)/g,
-    "$1<i>$2</i>",
-  );
+
+  // Links
   formatted = formatted.replace(
     /\[([^\]\n]+)]\((https?:\/\/[^)\s]+)\)/g,
     '<a href="$2">$1</a>',
   );
 
+  // Inline formatting — stash results so subsequent regexes can't corrupt them
+  formatted = stash(
+    formatted,
+    /\*\*([^*\n][\s\S]*?[^*\n])\*\*/g,
+    replacements,
+    (content) => `<b>${content}</b>`,
+  );
+  formatted = stash(
+    formatted,
+    /__([^_\n][\s\S]*?[^_\n])__/g,
+    replacements,
+    (content) => `<b>${content}</b>`,
+  );
+  formatted = stash(
+    formatted,
+    /(^|[^*])\*([^*\n][^*\n]*?[^*\n])\*(?!\*)/g,
+    replacements,
+    (before, content) => `${before}<i>${content}</i>`,
+  );
+  formatted = stash(
+    formatted,
+    /(^|[^_])_([^_\n][^_\n]*?[^_\n])_(?!_)/g,
+    replacements,
+    (before, content) => `${before}<i>${content}</i>`,
+  );
+
+  // Restore all stashed items
   formatted = formatted.replace(/\u0000(\d+)\u0000/g, (_match, index: string) =>
     replacements[Number(index)] ?? "",
   );
