@@ -11,6 +11,8 @@ import type {
 } from "./types.js";
 import { chunkParagraphs, sanitizeFileName } from "../utils.js";
 import { formatTelegramText } from "./format.js";
+import { MAX_MESSAGE_LENGTH } from "../constants.js";
+import { log } from "../logger.js";
 
 export class TelegramApi {
   constructor(private readonly getConfig: () => TelegramConfig) {}
@@ -116,12 +118,32 @@ export class TelegramApi {
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<TelegramSentMessage> {
     const formatted = formatTelegramText(text);
-    return await this.call<TelegramSentMessage>("sendMessage", {
-      chat_id: chatId,
-      text: formatted.text,
-      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
-      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-    });
+    try {
+      return await this.call<TelegramSentMessage>("sendMessage", {
+        chat_id: chatId,
+        text: formatted.text,
+        ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      });
+    } catch (error) {
+      const isParseError =
+        formatted.parseMode &&
+        error instanceof Error &&
+        error.message.includes("can't parse entities");
+      const isTooLong =
+        error instanceof Error &&
+        /too long|message is too long/i.test(error.message);
+      if (isParseError || isTooLong) {
+        log(
+          `${isTooLong ? "Message too long" : "HTML parse failed"}, sending plain text: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return await this.call<TelegramSentMessage>("sendMessage", {
+          chat_id: chatId,
+          text: text.slice(0, MAX_MESSAGE_LENGTH),
+        });
+      }
+      throw error;
+    }
   }
 
   async editMessageText(
@@ -131,13 +153,35 @@ export class TelegramApi {
     replyMarkup?: TelegramInlineKeyboardMarkup,
   ): Promise<void> {
     const formatted = formatTelegramText(text);
-    await this.call<unknown>("editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text: formatted.text,
-      ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
-      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-    });
+    try {
+      await this.call<unknown>("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: formatted.text,
+        ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      });
+    } catch (error) {
+      const isParseError =
+        formatted.parseMode &&
+        error instanceof Error &&
+        error.message.includes("can't parse entities");
+      const isTooLong =
+        error instanceof Error &&
+        /too long|message is too long/i.test(error.message);
+      if (isParseError || isTooLong) {
+        log(
+          `${isTooLong ? "Message too long" : "HTML parse failed"}, editing plain text: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        await this.call<unknown>("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: text.slice(0, MAX_MESSAGE_LENGTH),
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   async answerCallbackQuery(

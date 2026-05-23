@@ -26,24 +26,45 @@ export function guessMediaType(path: string): string | undefined {
 export function chunkParagraphs(text: string): string[] {
   const chunks: string[] = [];
   let current = "";
-  const flush = () => {
-    if (current.trim()) chunks.push(current.trim());
-    current = "";
-  };
-  for (const paragraph of text.split(/\n\n+/)) {
-    const parts =
-      paragraph.match(
-        new RegExp(`[\\s\\S]{1,${MAX_MESSAGE_LENGTH - 32}}`, "g"),
-      ) ?? [];
-    for (const part of parts) {
-      const candidate = current ? `${current}\n\n${part}` : part;
-      if (candidate.length <= MAX_MESSAGE_LENGTH) current = candidate;
-      else {
-        flush();
-        current = part;
+
+  const paragraphs = text.split(/\n\n+/);
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const paragraph = paragraphs[i];
+    const separator = i > 0 ? "\n\n" : "";
+
+    // If a single paragraph exceeds the limit, split it into fixed-size pieces
+    if (paragraph.length > MAX_MESSAGE_LENGTH) {
+      // Flush current chunk first, including separator if it fits
+      if (current) {
+        const withSep = current + separator;
+        chunks.push(withSep.length <= MAX_MESSAGE_LENGTH ? withSep : current);
+        current = "";
       }
+
+      let remaining = paragraph;
+      while (remaining.length > MAX_MESSAGE_LENGTH) {
+        chunks.push(remaining.slice(0, MAX_MESSAGE_LENGTH));
+        remaining = remaining.slice(MAX_MESSAGE_LENGTH);
+      }
+      current = remaining;
+      continue;
+    }
+
+    // Try to fit this paragraph into the current chunk
+    const candidate = current ? current + separator + paragraph : paragraph;
+    if (candidate.length <= MAX_MESSAGE_LENGTH) {
+      current = candidate;
+    } else {
+      // Doesn't fit — flush current (with separator if it fits) and start fresh
+      if (current) {
+        const withSep = current + separator;
+        chunks.push(withSep.length <= MAX_MESSAGE_LENGTH ? withSep : current);
+      }
+      current = paragraph;
     }
   }
-  flush();
+
+  if (current) chunks.push(current);
   return chunks.length ? chunks : [""];
 }
