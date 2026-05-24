@@ -1,3 +1,5 @@
+import { readFile, unlink, writeFile } from "node:fs/promises";
+
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -6,6 +8,7 @@ import type {
 
 import {
   MAX_MESSAGE_LENGTH,
+  PENDING_TURN_PATH,
   TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS,
 } from "./constants.js";
 import { log } from "./logger.js";
@@ -177,10 +180,12 @@ export class TelegramBridge {
   async shutdown(): Promise<void> {
     this.preview.stopTypingLoop();
     this.unsubscribe?.();
-    if (this.activeTelegramTurn)
+    if (this.activeTelegramTurn) {
+      await this.savePendingTurn();
       await this.preview
         .clear(this.activeTelegramTurn.chatId)
         .catch(() => undefined);
+    }
   }
 
   private async startNextTurnIfIdle(): Promise<void> {
@@ -194,11 +199,13 @@ export class TelegramBridge {
     const turn = this.queuedTelegramTurns.shift();
     if (!turn) return;
     this.activeTelegramTurn = turn;
+    await this.savePendingTurn();
     this.preview.reset();
     this.preview.startTypingLoop(turn.chatId);
     void session.sendUserMessage(turn.content).catch(async (error) => {
       this.preview.stopTypingLoop();
       this.activeTelegramTurn = undefined;
+      await this.clearPendingTurn();
       await this.preview.clear(turn.chatId);
       await this.api.sendTextReply(
         turn.chatId,
@@ -717,6 +724,7 @@ export class TelegramBridge {
         const doneTurn = this.activeTelegramTurn;
         this.preview.stopTypingLoop();
         this.activeTelegramTurn = undefined;
+        await this.clearPendingTurn();
         if (!doneTurn) {
           void this.startNextTurnIfIdle();
           return;
@@ -769,6 +777,43 @@ export class TelegramBridge {
         }
         void this.startNextTurnIfIdle();
       })();
+    }
+  }
+
+  async restorePendingTurn(): Promise<boolean> {
+    try {
+      const data = await readFile(PENDING_TURN_PATH, "utf-8");
+      const turn = JSON.parse(data) as PendingTelegramTurn;
+      await this.clearPendingTurn();
+      this.queuedTelegramTurns.unshift(turn);
+      log("restored pending turn from previous session");
+      await this.startNextTurnIfIdle();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async savePendingTurn(): Promise<void> {
+    if (!this.activeTelegramTurn) return;
+    try {
+      await writeFile(
+        PENDING_TURN_PATH,
+        JSON.stringify(this.activeTelegramTurn),
+        "utf-8",
+      );
+    } catch (e) {
+      log(
+        `failed to persist pending turn: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  private async clearPendingTurn(): Promise<void> {
+    try {
+      await unlink(PENDING_TURN_PATH);
+    } catch {
+      // ignore missing file
     }
   }
 

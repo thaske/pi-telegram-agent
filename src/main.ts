@@ -56,14 +56,9 @@ async function main(): Promise<void> {
   runtime.setRebindSession(async () => bridge!.bindSession());
   await bridge.bindSession();
 
-  // Notify user on startup in case a previous turn was interrupted by a restart
-  if (config.allowedUserId) {
-    await bridge.api
-      .sendMessage(
-        config.allowedUserId,
-        "🔄 Bot restarted. If your last message wasn't answered, please resend it.",
-      )
-      .catch(() => undefined);
+  // Resume a pending turn if the bot was restarted while processing
+  if (await bridge.restorePendingTurn()) {
+    log("resumed pending turn");
   }
 
   const session = bridge.currentSession;

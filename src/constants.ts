@@ -7,6 +7,7 @@ export const CONFIG_PATH =
 export const TEMP_DIR =
   process.env.PI_TELEGRAM_TMP ??
   join(homedir(), ".pi", "agent", "tmp", "telegram-agent");
+export const PENDING_TURN_PATH = join(TEMP_DIR, "pending-turn.json");
 export const CWD = process.env.PI_TELEGRAM_CWD ?? process.cwd();
 export const TELEGRAM_PREFIX = "[telegram]";
 export const MAX_MESSAGE_LENGTH = 4096;

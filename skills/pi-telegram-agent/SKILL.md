@@ -18,11 +18,9 @@ The repo lives at `~/Git/pi-telegram-agent`. The agent runs as a **systemd user 
 
 ## Startup Behavior
 
-On every startup, if `allowedUserId` is configured, the bot sends a one-time message:
+On every startup, the bot checks for a `pending-turn.json` file in `TEMP_DIR` (defaults to `~/.pi/agent/tmp/telegram-agent`). If present, it means the bot was restarted **mid-turn** — the turn is restored to the queue and automatically resumed once the session is idle.
 
-> 🔄 Bot restarted. If your last message wasn't answered, please resend it.
-
-This covers the case where the process was restarted (e.g. via systemd) **after** receiving a message but **before** sending the reply. Telegram's `getUpdates` offset handles messages that arrived while the bot was offline, but it cannot recover an update that was already acknowledged and then lost mid-processing.
+This covers the case where the process was restarted via systemd **after** receiving a message but **before** sending the reply. Telegram's `getUpdates` offset handles messages that arrived while the bot was offline, but it cannot recover an update that was already acknowledged and then lost mid-processing. The pending-turn persistence closes that gap.
 
 ## Registered Telegram Commands
 
