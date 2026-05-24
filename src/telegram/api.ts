@@ -72,7 +72,6 @@ export class TelegramApi {
           { command: "model", description: "Choose the active Pi model" },
           { command: "compact", description: "Compact the current Pi chat" },
           { command: "stop", description: "Abort the active Pi turn" },
-          { command: "help", description: "Show Telegram bridge help" },
         ],
       },
       { signal },

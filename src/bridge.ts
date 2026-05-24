@@ -362,11 +362,11 @@ export class TelegramBridge {
       );
       return;
     }
-    if (lower === "/help" || lower === "/start") {
+    if (lower === "/start") {
       await this.api.sendTextReply(
         firstMessage.chat.id,
         firstMessage.message_id,
-        "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop, /help.",
+        "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop.",
       );
       return;
     }
