@@ -16,6 +16,14 @@ The repo lives at `~/Git/pi-telegram-agent`. The agent runs as a **systemd user 
   - `PI_TELEGRAM_CWD` (defaults to process start directory; often set to `%h` = `$HOME` in systemd)
   - `EXA_API_KEY` (loaded via `EnvironmentFile=-%h/.pi/agent/telegram-agent.env` in systemd)
 
+## Startup Behavior
+
+On every startup, if `allowedUserId` is configured, the bot sends a one-time message:
+
+> 🔄 Bot restarted. If your last message wasn't answered, please resend it.
+
+This covers the case where the process was restarted (e.g. via systemd) **after** receiving a message but **before** sending the reply. Telegram's `getUpdates` offset handles messages that arrived while the bot was offline, but it cannot recover an update that was already acknowledged and then lost mid-processing.
+
 ## Registered Telegram Commands
 
 The bot registers these command suggestions with Telegram:
