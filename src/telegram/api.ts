@@ -12,6 +12,7 @@ import type {
 } from "./types.js";
 import { chunkParagraphs, sanitizeFileName } from "../utils.js";
 import { formatTelegramText } from "./format.js";
+import { toTelegramRichMarkdown } from "./rich-markdown.js";
 import { MAX_MESSAGE_LENGTH, MAX_RICH_MESSAGE_LENGTH } from "../constants.js";
 import { log } from "../logger.js";
 
@@ -294,7 +295,7 @@ export class TelegramApi {
   }
 
   private toInputRichMessage(text: string): TelegramInputRichMessage {
-    return { markdown: text };
+    return { markdown: toTelegramRichMarkdown(text) };
   }
 
   private handleRichMessageFailure(error: unknown, fallbackAction: string): void {
