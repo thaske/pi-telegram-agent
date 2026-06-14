@@ -7,14 +7,18 @@ import type {
   TelegramConfig,
   TelegramGetFileResult,
   TelegramInlineKeyboardMarkup,
+  TelegramInputRichMessage,
   TelegramSentMessage,
 } from "./types.js";
 import { chunkParagraphs, sanitizeFileName } from "../utils.js";
 import { formatTelegramText } from "./format.js";
-import { MAX_MESSAGE_LENGTH } from "../constants.js";
+import { MAX_MESSAGE_LENGTH, MAX_RICH_MESSAGE_LENGTH } from "../constants.js";
 import { log } from "../logger.js";
 
 export class TelegramApi {
+  private richMessageSupport: "unknown" | "supported" | "unsupported" =
+    "unknown";
+
   constructor(private readonly getConfig: () => TelegramConfig) {}
 
   async call<TResponse>(
@@ -104,14 +108,128 @@ export class TelegramApi {
     text: string,
   ): Promise<number | undefined> {
     let lastMessageId: number | undefined;
-    for (const chunk of chunkParagraphs(text)) {
-      const sent = await this.sendMessage(chatId, chunk);
-      lastMessageId = sent.message_id;
+    const chunks =
+      this.richMessageSupport === "unsupported"
+        ? chunkParagraphs(text)
+        : chunkParagraphs(text, MAX_RICH_MESSAGE_LENGTH);
+
+    for (const chunk of chunks) {
+      if (this.richMessageSupport !== "unsupported") {
+        try {
+          const sent = await this.sendRichMessage(chatId, chunk);
+          lastMessageId = sent.message_id;
+          continue;
+        } catch (error) {
+          this.handleRichMessageFailure(error, "sending rich text reply");
+        }
+      }
+      for (const legacyChunk of chunkParagraphs(chunk)) {
+        const sent = await this.sendLegacyMessage(chatId, legacyChunk);
+        lastMessageId = sent.message_id;
+      }
     }
     return lastMessageId;
   }
 
   async sendMessage(
+    chatId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<TelegramSentMessage> {
+    if (
+      this.richMessageSupport !== "unsupported" &&
+      text.length <= MAX_RICH_MESSAGE_LENGTH
+    ) {
+      try {
+        return await this.sendRichMessage(chatId, text, replyMarkup);
+      } catch (error) {
+        this.handleRichMessageFailure(error, "sending legacy message");
+      }
+    }
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      let sent: TelegramSentMessage | undefined;
+      const legacyChunks = chunkParagraphs(text);
+      for (let i = 0; i < legacyChunks.length; i++)
+        sent = await this.sendLegacyMessage(
+          chatId,
+          legacyChunks[i] ?? "",
+          i === legacyChunks.length - 1 ? replyMarkup : undefined,
+        );
+      return sent!;
+    }
+    return await this.sendLegacyMessage(chatId, text, replyMarkup);
+  }
+
+  async sendRichMessage(
+    chatId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<TelegramSentMessage> {
+    const sent = await this.call<TelegramSentMessage>("sendRichMessage", {
+      chat_id: chatId,
+      rich_message: this.toInputRichMessage(text),
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+    this.richMessageSupport = "supported";
+    return sent;
+  }
+
+  async sendRichMessageDraft(
+    chatId: number,
+    draftId: number,
+    text: string,
+  ): Promise<void> {
+    await this.call<boolean>("sendRichMessageDraft", {
+      chat_id: chatId,
+      draft_id: draftId,
+      rich_message: this.toInputRichMessage(text),
+    });
+    this.richMessageSupport = "supported";
+  }
+
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    replyMarkup?: TelegramInlineKeyboardMarkup,
+  ): Promise<void> {
+    if (
+      this.richMessageSupport !== "unsupported" &&
+      text.length <= MAX_RICH_MESSAGE_LENGTH
+    ) {
+      try {
+        await this.call<unknown>("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          rich_message: this.toInputRichMessage(text),
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+        });
+        this.richMessageSupport = "supported";
+        return;
+      } catch (error) {
+        this.handleRichMessageFailure(error, "editing legacy message");
+      }
+    }
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      const legacyChunks = chunkParagraphs(text);
+      await this.editLegacyMessageText(
+        chatId,
+        messageId,
+        legacyChunks[0] ?? "",
+        legacyChunks.length === 1 ? replyMarkup : undefined,
+      );
+      for (let i = 1; i < legacyChunks.length; i++)
+        await this.sendLegacyMessage(
+          chatId,
+          legacyChunks[i] ?? "",
+          i === legacyChunks.length - 1 ? replyMarkup : undefined,
+        );
+      return;
+    }
+    await this.editLegacyMessageText(chatId, messageId, text, replyMarkup);
+  }
+
+  private async sendLegacyMessage(
     chatId: number,
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
@@ -125,27 +243,23 @@ export class TelegramApi {
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       });
     } catch (error) {
-      const isParseError =
-        formatted.parseMode &&
-        error instanceof Error &&
-        error.message.includes("can't parse entities");
-      const isTooLong =
-        error instanceof Error &&
-        /too long|message is too long/i.test(error.message);
+      const isParseError = this.isLegacyHtmlParseError(error, formatted);
+      const isTooLong = this.isTooLongError(error);
       if (isParseError || isTooLong) {
         log(
-          `${isTooLong ? "Message too long" : "HTML parse failed"}, sending plain text: ${error instanceof Error ? error.message : String(error)}`,
+          `${isTooLong ? "Message too long" : "HTML parse failed"}, sending plain text: ${this.formatError(error)}`,
         );
         return await this.call<TelegramSentMessage>("sendMessage", {
           chat_id: chatId,
           text: text.slice(0, MAX_MESSAGE_LENGTH),
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         });
       }
       throw error;
     }
   }
 
-  async editMessageText(
+  private async editLegacyMessageText(
     chatId: number,
     messageId: number,
     text: string,
@@ -161,26 +275,61 @@ export class TelegramApi {
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       });
     } catch (error) {
-      const isParseError =
-        formatted.parseMode &&
-        error instanceof Error &&
-        error.message.includes("can't parse entities");
-      const isTooLong =
-        error instanceof Error &&
-        /too long|message is too long/i.test(error.message);
+      const isParseError = this.isLegacyHtmlParseError(error, formatted);
+      const isTooLong = this.isTooLongError(error);
       if (isParseError || isTooLong) {
         log(
-          `${isTooLong ? "Message too long" : "HTML parse failed"}, editing plain text: ${error instanceof Error ? error.message : String(error)}`,
+          `${isTooLong ? "Message too long" : "HTML parse failed"}, editing plain text: ${this.formatError(error)}`,
         );
         await this.call<unknown>("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
           text: text.slice(0, MAX_MESSAGE_LENGTH),
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         });
         return;
       }
       throw error;
     }
+  }
+
+  private toInputRichMessage(text: string): TelegramInputRichMessage {
+    return { markdown: text };
+  }
+
+  private handleRichMessageFailure(error: unknown, fallbackAction: string): void {
+    const unsupported = this.isRichMessageUnsupportedError(error);
+    if (unsupported) this.richMessageSupport = "unsupported";
+    log(
+      `${unsupported ? "Rich messages unsupported" : "Rich message failed"}, ${fallbackAction}: ${this.formatError(error)}`,
+    );
+  }
+
+  private isRichMessageUnsupportedError(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      (/method not found|unsupported|can't find method/i.test(error.message) ||
+        /^not found$/i.test(error.message.trim()))
+    );
+  }
+
+  private isLegacyHtmlParseError(
+    error: unknown,
+    formatted: ReturnType<typeof formatTelegramText>,
+  ): boolean {
+    return (
+      !!formatted.parseMode &&
+      error instanceof Error &&
+      error.message.includes("can't parse entities")
+    );
+  }
+
+  private isTooLongError(error: unknown): boolean {
+    return error instanceof Error && /too long|message is too long/i.test(error.message);
+  }
+
+  private formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   async answerCallbackQuery(

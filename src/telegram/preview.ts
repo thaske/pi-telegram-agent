@@ -1,5 +1,6 @@
 import {
   MAX_MESSAGE_LENGTH,
+  MAX_RICH_MESSAGE_LENGTH,
   PREVIEW_THROTTLE_MS,
   TELEGRAM_DRAFT_ID_MAX,
 } from "../constants.js";
@@ -10,6 +11,7 @@ import type { TelegramPreviewState, TelegramSentMessage } from "./types.js";
 export class TelegramPreviewManager {
   private state: TelegramPreviewState | undefined;
   private draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
+  private richDraftSupport: "unknown" | "supported" | "unsupported" = "unknown";
   private nextDraftId = 0;
   private typingInterval: ReturnType<typeof setInterval> | undefined;
 
@@ -76,11 +78,14 @@ export class TelegramPreviewManager {
     this.state = undefined;
     if (state.mode === "draft" && state.draftId !== undefined) {
       try {
-        await this.api.call("sendMessageDraft", {
-          chat_id: chatId,
-          draft_id: state.draftId,
-          text: "",
-        });
+        if (this.richDraftSupport === "supported")
+          await this.api.sendRichMessageDraft(chatId, state.draftId, "");
+        else
+          await this.api.call("sendMessageDraft", {
+            chat_id: chatId,
+            draft_id: state.draftId,
+            text: "",
+          });
       } catch {
         /* ignore */
       }
@@ -133,10 +138,28 @@ export class TelegramPreviewManager {
     state.flushTimer = undefined;
     const text = state.pendingText.trim();
     if (!text || text === state.lastSentText) return;
-    const truncated =
+    const richTruncated =
+      text.length > MAX_RICH_MESSAGE_LENGTH
+        ? text.slice(0, MAX_RICH_MESSAGE_LENGTH)
+        : text;
+    const legacyTruncated =
       text.length > MAX_MESSAGE_LENGTH
         ? text.slice(0, MAX_MESSAGE_LENGTH)
         : text;
+    if (this.richDraftSupport !== "unsupported") {
+      const draftId = state.draftId ?? this.allocateDraftId();
+      state.draftId = draftId;
+      try {
+        await this.api.sendRichMessageDraft(chatId, draftId, richTruncated);
+        this.richDraftSupport = "supported";
+        this.draftSupport = "supported";
+        state.mode = "draft";
+        state.lastSentText = richTruncated;
+        return;
+      } catch {
+        this.richDraftSupport = "unsupported";
+      }
+    }
     if (this.draftSupport !== "unsupported") {
       const draftId = state.draftId ?? this.allocateDraftId();
       state.draftId = draftId;
@@ -144,25 +167,25 @@ export class TelegramPreviewManager {
         await this.api.call("sendMessageDraft", {
           chat_id: chatId,
           draft_id: draftId,
-          text: truncated,
+          text: legacyTruncated,
         });
         this.draftSupport = "supported";
         state.mode = "draft";
-        state.lastSentText = truncated;
+        state.lastSentText = legacyTruncated;
         return;
       } catch {
         this.draftSupport = "unsupported";
       }
     }
     if (state.messageId === undefined) {
-      const sent = await this.api.sendMessage(chatId, truncated);
+      const sent = await this.api.sendMessage(chatId, richTruncated);
       state.messageId = sent.message_id;
       state.mode = "message";
-      state.lastSentText = truncated;
+      state.lastSentText = richTruncated;
       return;
     }
-    await this.api.editMessageText(chatId, state.messageId, truncated);
+    await this.api.editMessageText(chatId, state.messageId, richTruncated);
     state.mode = "message";
-    state.lastSentText = truncated;
+    state.lastSentText = richTruncated;
   }
 }

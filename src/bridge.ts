@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
-  MAX_MESSAGE_LENGTH,
+  MAX_RICH_MESSAGE_LENGTH,
   PENDING_TURN_PATH,
   TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS,
 } from "./constants.js";
@@ -750,7 +750,7 @@ export class TelegramBridge {
           if (this.preview.hasPreview)
             this.preview.pendingText =
               finalText ?? this.preview.pendingText ?? "";
-          if (finalText && finalText.length <= MAX_MESSAGE_LENGTH)
+          if (finalText && finalText.length <= MAX_RICH_MESSAGE_LENGTH)
             await this.preview.finalize(doneTurn.chatId);
           else {
             await this.preview.clear(doneTurn.chatId);

@@ -24,8 +24,8 @@ systemd → bun run src/main.ts → Pi AgentSessionRuntime
 - Starts by continuing the most recent Pi session for `PI_TELEGRAM_CWD`, so systemd restarts keep chat history.
 - `/new` calls `AgentSessionRuntime.newSession()` directly; no fake terminal or `screen` required.
 - `/model` opens a Telegram inline keyboard to select or search any authenticated Pi model, sorted by OpenRouter weekly popularity when available.
-- Streams assistant previews back to Telegram.
-- Converts common Markdown formatting (bold, italic, inline/fenced code, links, headings) to Telegram HTML formatting.
+- Streams assistant previews back to Telegram, using Bot API 10.1 rich message drafts when available.
+- Sends assistant output as Bot API 10.1 rich Markdown messages when available (headings, lists, tables, media blocks, quotes, footnotes, formulas, and nested formatting), with automatic fallback to legacy Telegram HTML formatting.
 - Supports Telegram image/file downloads.
 - Provides a `telegram_attach` tool so Pi can send generated files back to Telegram.
 

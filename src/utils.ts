@@ -23,7 +23,10 @@ export function guessMediaType(path: string): string | undefined {
   return undefined;
 }
 
-export function chunkParagraphs(text: string): string[] {
+export function chunkParagraphs(
+  text: string,
+  maxLength = MAX_MESSAGE_LENGTH,
+): string[] {
   const chunks: string[] = [];
   let current = "";
 
@@ -34,18 +37,18 @@ export function chunkParagraphs(text: string): string[] {
     const separator = i > 0 ? "\n\n" : "";
 
     // If a single paragraph exceeds the limit, split it into fixed-size pieces
-    if (paragraph.length > MAX_MESSAGE_LENGTH) {
+    if (paragraph.length > maxLength) {
       // Flush current chunk first, including separator if it fits
       if (current) {
         const withSep = current + separator;
-        chunks.push(withSep.length <= MAX_MESSAGE_LENGTH ? withSep : current);
+        chunks.push(withSep.length <= maxLength ? withSep : current);
         current = "";
       }
 
       let remaining = paragraph;
-      while (remaining.length > MAX_MESSAGE_LENGTH) {
-        chunks.push(remaining.slice(0, MAX_MESSAGE_LENGTH));
-        remaining = remaining.slice(MAX_MESSAGE_LENGTH);
+      while (remaining.length > maxLength) {
+        chunks.push(remaining.slice(0, maxLength));
+        remaining = remaining.slice(maxLength);
       }
       current = remaining;
       continue;
@@ -53,13 +56,13 @@ export function chunkParagraphs(text: string): string[] {
 
     // Try to fit this paragraph into the current chunk
     const candidate = current ? current + separator + paragraph : paragraph;
-    if (candidate.length <= MAX_MESSAGE_LENGTH) {
+    if (candidate.length <= maxLength) {
       current = candidate;
     } else {
       // Doesn't fit — flush current (with separator if it fits) and start fresh
       if (current) {
         const withSep = current + separator;
-        chunks.push(withSep.length <= MAX_MESSAGE_LENGTH ? withSep : current);
+        chunks.push(withSep.length <= maxLength ? withSep : current);
       }
       current = paragraph;
     }

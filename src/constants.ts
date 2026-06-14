@@ -11,6 +11,7 @@ export const PENDING_TURN_PATH = join(TEMP_DIR, "pending-turn.json");
 export const CWD = process.env.PI_TELEGRAM_CWD ?? process.cwd();
 export const TELEGRAM_PREFIX = "[telegram]";
 export const MAX_MESSAGE_LENGTH = 4096;
+export const MAX_RICH_MESSAGE_LENGTH = 32768;
 export const MAX_ATTACHMENTS_PER_TURN = 10;
 export const PREVIEW_THROTTLE_MS = 750;
 export const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;

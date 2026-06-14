@@ -75,6 +75,7 @@ export interface TelegramMessage {
   voice?: TelegramVoice;
   animation?: TelegramAnimation;
   sticker?: TelegramSticker;
+  rich_message?: TelegramRichMessage;
 }
 export interface TelegramCallbackQuery {
   id: string;
@@ -100,6 +101,24 @@ export interface TelegramGetFileResult {
 }
 export interface TelegramSentMessage {
   message_id: number;
+}
+export interface TelegramInputRichMessage {
+  html?: string;
+  markdown?: string;
+  is_rtl?: boolean;
+  skip_entity_detection?: boolean;
+}
+export type TelegramRichText =
+  | string
+  | TelegramRichText[]
+  | Record<string, unknown>;
+export interface TelegramRichBlock {
+  type: string;
+  [key: string]: unknown;
+}
+export interface TelegramRichMessage {
+  blocks: TelegramRichBlock[];
+  is_rtl?: boolean;
 }
 export interface TelegramFileInfo {
   file_id: string;
