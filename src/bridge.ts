@@ -22,6 +22,7 @@ import { createTelegramAttachTool } from "./pi/telegram-attach-tool.js";
 import { TelegramApi } from "./telegram/api.js";
 import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files.js";
 import { TelegramPreviewManager } from "./telegram/preview.js";
+import { TelegramProgressManager } from "./telegram/progress.js";
 import type {
   PendingTelegramTurn,
   TelegramCallbackQuery,
@@ -37,6 +38,7 @@ type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 export class TelegramBridge {
   readonly api: TelegramApi;
   readonly preview: TelegramPreviewManager;
+  readonly progress: TelegramProgressManager;
   readonly attachTool = createTelegramAttachTool(() => this.activeTelegramTurn);
 
   private runtime: Runtime | undefined;
@@ -56,6 +58,7 @@ export class TelegramBridge {
   ) {
     this.api = new TelegramApi(() => this.config);
     this.preview = new TelegramPreviewManager(this.api);
+    this.progress = new TelegramProgressManager(this.api);
   }
 
   get currentSession(): AgentSession | undefined {
@@ -76,13 +79,17 @@ export class TelegramBridge {
         select: async () => undefined,
         confirm: async () => false,
         input: async () => undefined,
-        notify: (m, t) => log(`notify:${t ?? "info"}: ${m}`),
+        notify: (m, t) => {
+          log(`notify:${t ?? "info"}: ${m}`);
+          if (this.activeTelegramTurn)
+            this.progress.setStatus(`notify:${t ?? "info"}`, m);
+        },
         onTerminalInput: () => () => undefined,
-        setStatus: () => undefined,
-        setWorkingMessage: () => undefined,
+        setStatus: (key, text) => this.progress.setStatus(key, text),
+        setWorkingMessage: (message) => this.progress.setWorkingMessage(message),
         setWorkingVisible: () => undefined,
         setWorkingIndicator: () => undefined,
-        setHiddenThinkingLabel: () => undefined,
+        setHiddenThinkingLabel: (label) => this.progress.setHiddenThinkingLabel(label),
         setWidget: () => undefined,
         setFooter: () => undefined,
         setHeader: () => undefined,
@@ -96,7 +103,14 @@ export class TelegramBridge {
         setEditorComponent: () => undefined,
         getEditorComponent: () => undefined,
         get theme() {
-          return {} as never;
+          return {
+            fg: (_color: string, text: string) => text,
+            bg: (_color: string, text: string) => text,
+            bold: (text: string) => text,
+            dim: (text: string) => text,
+            italic: (text: string) => text,
+            underline: (text: string) => text,
+          } as never;
         },
         getAllThemes: () => [],
         getTheme: () => undefined,
@@ -179,6 +193,7 @@ export class TelegramBridge {
 
   async shutdown(): Promise<void> {
     this.preview.stopTypingLoop();
+    this.progress.discard();
     this.unsubscribe?.();
     if (this.activeTelegramTurn) {
       await this.savePendingTurn();
@@ -201,9 +216,11 @@ export class TelegramBridge {
     this.activeTelegramTurn = turn;
     await this.savePendingTurn();
     this.preview.reset();
+    this.progress.start(turn.chatId, turn.replyToMessageId);
     this.preview.startTypingLoop(turn.chatId);
     void session.sendUserMessage(turn.content).catch(async (error) => {
       this.preview.stopTypingLoop();
+      this.progress.fail(error instanceof Error ? error.message : String(error));
       this.activeTelegramTurn = undefined;
       await this.clearPendingTurn();
       await this.preview.clear(turn.chatId);
@@ -594,7 +611,20 @@ export class TelegramBridge {
   ): Promise<void> {
     const data = query.data ?? "";
     const message = query.message;
-    if (!message || !data.startsWith("model:")) return;
+    if (!message) return;
+    if (data === "turn:stop") {
+      const session = this.requireSession();
+      if (session.isStreaming) {
+        if (this.queuedTelegramTurns.length)
+          this.preserveQueuedTurnsAsHistory = true;
+        await session.abort();
+        await this.api.answerCallbackQuery(query.id, "Aborting current turn…");
+      } else {
+        await this.api.answerCallbackQuery(query.id, "No active turn.");
+      }
+      return;
+    }
+    if (!data.startsWith("model:")) return;
     if (this.requireSession().isStreaming) {
       await this.api.answerCallbackQuery(
         query.id,
@@ -702,23 +732,57 @@ export class TelegramBridge {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const turn = this.activeTelegramTurn;
-    if (
-      event.type === "message_start" &&
-      turn &&
-      isAssistantMessage(event.message)
-    ) {
+    if (event.type === "message_start" && turn && isAssistantMessage(event.message)) {
+      this.progress.markAssistantStreaming();
       if (this.preview.hasVisibleText())
         void this.preview.finalize(turn.chatId);
       this.preview.reset();
     }
-    if (
-      event.type === "message_update" &&
-      turn &&
-      isAssistantMessage(event.message)
-    ) {
+    if (event.type === "message_update" && turn && isAssistantMessage(event.message)) {
+      const assistantEvent = event.assistantMessageEvent;
+      if (assistantEvent.type === "thinking_start" || assistantEvent.type === "thinking_delta")
+        this.progress.markThinking(true);
+      else if (assistantEvent.type === "thinking_end")
+        this.progress.markThinking(false);
+      else if (assistantEvent.type.startsWith("text_"))
+        this.progress.markAssistantStreaming();
+      else if (assistantEvent.type.startsWith("toolcall_"))
+        this.progress.setStatus("tool-call", "Preparing a tool call…");
       this.preview.pendingText = getMessageText(event.message);
       this.preview.scheduleFlush(turn.chatId);
     }
+    if (event.type === "tool_execution_start")
+      this.progress.toolStart(event.toolCallId, event.toolName, event.args);
+    if (event.type === "tool_execution_update")
+      this.progress.toolUpdate(event.toolCallId, event.toolName, event.args);
+    if (event.type === "tool_execution_end")
+      this.progress.toolEnd(
+        event.toolCallId,
+        event.toolName,
+        event.result,
+        event.isError,
+      );
+    if (event.type === "compaction_start")
+      this.progress.setStatus("compaction", `Compacting context (${event.reason})…`);
+    if (event.type === "compaction_end")
+      this.progress.setStatus(
+        "compaction",
+        event.aborted
+          ? "Compaction aborted"
+          : event.errorMessage
+            ? `Compaction failed: ${event.errorMessage}`
+            : "Compaction complete",
+      );
+    if (event.type === "auto_retry_start")
+      this.progress.setStatus(
+        "retry",
+        `Retrying after error (${event.attempt}/${event.maxAttempts})…`,
+      );
+    if (event.type === "auto_retry_end")
+      this.progress.setStatus(
+        "retry",
+        event.success ? "Retry succeeded" : event.finalError ?? "Retry failed",
+      );
     if (event.type === "agent_end") {
       void (async () => {
         const doneTurn = this.activeTelegramTurn;
@@ -732,11 +796,15 @@ export class TelegramBridge {
         try {
           const assistant = extractAssistantText(event.messages);
           if (assistant.stopReason === "aborted") {
+            this.progress.complete();
             await this.preview.clear(doneTurn.chatId);
             void this.startNextTurnIfIdle();
             return;
           }
           if (assistant.stopReason === "error") {
+            this.progress.fail(
+              assistant.errorMessage || "Pi failed while processing the request.",
+            );
             await this.preview.clear(doneTurn.chatId);
             await this.api.sendTextReply(
               doneTurn.chatId,
@@ -746,6 +814,7 @@ export class TelegramBridge {
             void this.startNextTurnIfIdle();
             return;
           }
+          this.progress.complete();
           const finalText = assistant.text;
           if (this.preview.hasPreview)
             this.preview.pendingText =
@@ -765,6 +834,9 @@ export class TelegramBridge {
         } catch (error) {
           log(
             `agent_end send error: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          this.progress.fail(
+            `Failed to send response: ${error instanceof Error ? error.message : String(error)}`,
           );
           await this.preview.clear(doneTurn.chatId).catch(() => undefined);
           await this.api

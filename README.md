@@ -25,6 +25,7 @@ systemd → bun run src/main.ts → Pi AgentSessionRuntime
 - `/new` calls `AgentSessionRuntime.newSession()` directly; no fake terminal or `screen` required.
 - `/model` opens a Telegram inline keyboard to select or search any authenticated Pi model, sorted by OpenRouter weekly popularity when available.
 - Streams assistant previews back to Telegram, using Bot API 10.1 rich message drafts when available.
+- Shows a throttled in-chat progress panel for long turns, including safe thinking status, tool-call lifecycle summaries, extension status updates, elapsed time, and a Stop button.
 - Sends assistant output as Bot API 10.1 rich Markdown messages when available (headings, lists, tables, media blocks, quotes, footnotes, formulas, and nested formatting), with automatic fallback to legacy Telegram HTML formatting.
 - Supports Telegram image/file downloads.
 - Provides a `telegram_attach` tool so Pi can send generated files back to Telegram.
