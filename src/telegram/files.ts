@@ -1,15 +1,15 @@
 import { readFile } from "node:fs/promises";
 
-import { TELEGRAM_PREFIX } from "../constants.js";
-import { TelegramApi } from "./api.js";
+import { TELEGRAM_PREFIX } from "../constants";
+import { guessExtensionFromMime, guessMediaType } from "../utils";
+import { TelegramApi } from "./api";
 import type {
   DownloadedTelegramFile,
   PendingTelegramTurn,
   TelegramFileInfo,
   TelegramMessage,
   TelegramSentMessage,
-} from "./types.js";
-import { guessExtensionFromMime, guessMediaType } from "../utils.js";
+} from "./types";
 
 export async function sendQueuedAttachments(
   api: TelegramApi,

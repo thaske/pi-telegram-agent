@@ -9,10 +9,10 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
-import { TelegramBridge } from "./bridge.js";
-import { readConfig, writeConfig } from "./config.js";
-import { CONFIG_PATH, CWD, TEMP_DIR } from "./constants.js";
-import { log } from "./logger.js";
+import { TelegramBridge } from "./bridge";
+import { readConfig, writeConfig } from "./config";
+import { CONFIG_PATH, CWD, TEMP_DIR } from "./constants";
+import { log } from "./logger";
 
 let bridge: TelegramBridge | undefined;
 let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>> | undefined;

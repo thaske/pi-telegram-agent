@@ -1,10 +1,10 @@
 import {
   TELEGRAM_PROGRESS_INITIAL_DELAY_MS,
   TELEGRAM_PROGRESS_THROTTLE_MS,
-} from "../constants.js";
-import { log } from "../logger.js";
-import type { TelegramInlineKeyboardMarkup } from "./types.js";
-import { TelegramApi } from "./api.js";
+} from "../constants";
+import { log } from "../logger";
+import { TelegramApi } from "./api";
+import type { TelegramInlineKeyboardMarkup } from "./types";
 
 type ToolState = "running" | "done" | "error";
 
@@ -252,7 +252,11 @@ export class TelegramProgressManager {
       if (!text.trim() || text === state.lastSentText) return;
       const replyMarkup = state.completed ? undefined : this.stopMarkup();
       if (!state.visible || state.messageId === undefined) {
-        const sent = await this.api.sendMessage(state.chatId, text, replyMarkup);
+        const sent = await this.api.sendMessage(
+          state.chatId,
+          text,
+          replyMarkup,
+        );
         state.messageId = sent.message_id;
         state.visible = true;
       } else {
@@ -304,7 +308,9 @@ export class TelegramProgressManager {
     }
 
     if (toolCount) {
-      const failed = failedTools.length ? ` · ${failedTools.length} failed` : "";
+      const failed = failedTools.length
+        ? ` · ${failedTools.length} failed`
+        : "";
       lines.push(
         "",
         `▸ Tools  ${completedTools.length}/${toolCount} done${failed}`,
@@ -312,7 +318,11 @@ export class TelegramProgressManager {
       const visibleTools = state.tools.slice(-5);
       const hidden = state.tools.length - visibleTools.length;
       if (hidden > 0)
-        lines.push(this.indent(`… ${hidden} earlier tool call${hidden === 1 ? "" : "s"}`));
+        lines.push(
+          this.indent(
+            `… ${hidden} earlier tool call${hidden === 1 ? "" : "s"}`,
+          ),
+        );
       for (const tool of visibleTools) lines.push(...this.renderTool(tool));
     } else if (state.thinkingSeen) {
       lines.push(
@@ -338,21 +348,29 @@ export class TelegramProgressManager {
   }
 
   private currentActivity(state: ProgressState): string | undefined {
-    const running = state.tools.filter((tool) => tool.state === "running").at(-1);
+    const running = state.tools
+      .filter((tool) => tool.state === "running")
+      .at(-1);
     if (running) return `Using ${running.label}`;
     if (state.thinkingActive)
-      return state.hiddenThinkingLabel ?? "Reasoning privately — raw chain-of-thought is hidden.";
+      return (
+        state.hiddenThinkingLabel ??
+        "Reasoning privately — raw chain-of-thought is hidden."
+      );
     if (state.assistantStreaming) return "Writing response text";
     return undefined;
   }
 
   private renderTool(tool: ProgressTool): string[] {
-    const icon = tool.state === "running" ? "⏳" : tool.state === "done" ? "✅" : "❌";
+    const icon =
+      tool.state === "running" ? "⏳" : tool.state === "done" ? "✅" : "❌";
     const duration = tool.endedAt
       ? ` · ${this.formatElapsed(tool.endedAt - tool.startedAt)}`
       : "";
     const [name, detail] = this.splitToolLabel(tool.label);
-    const lines = [this.indent(`${icon} ${this.truncate(name, 72)}${duration}`)];
+    const lines = [
+      this.indent(`${icon} ${this.truncate(name, 72)}${duration}`),
+    ];
     if (detail) lines.push(this.indent(this.truncate(detail, 120), 2));
     if (tool.note) lines.push(this.indent(this.truncate(tool.note, 120), 2));
     return lines;
@@ -369,7 +387,9 @@ export class TelegramProgressManager {
   }
 
   private stopMarkup(): TelegramInlineKeyboardMarkup {
-    return { inline_keyboard: [[{ text: "Stop", callback_data: "turn:stop" }]] };
+    return {
+      inline_keyboard: [[{ text: "Stop", callback_data: "turn:stop" }]],
+    };
   }
 
   private formatToolLabel(toolName: string, args: unknown): string {
@@ -394,7 +414,9 @@ export class TelegramProgressManager {
   private summarizeArgs(data: Record<string, unknown> | undefined): string {
     if (!data) return "";
     const entries = Object.entries(data)
-      .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+      .filter(([, value]) =>
+        ["string", "number", "boolean"].includes(typeof value),
+      )
       .slice(0, 2)
       .map(([key, value]) => `${key}=${this.singleLine(String(value))}`);
     return this.truncate(entries.join(", "), 120);
@@ -432,7 +454,9 @@ export class TelegramProgressManager {
 
   private firstString(value: unknown): string | undefined {
     if (!Array.isArray(value)) return undefined;
-    const first = value.find((item) => typeof item === "string" && item.trim());
+    const first = (value as unknown[]).find(
+      (item) => typeof item === "string" && item.trim(),
+    );
     return typeof first === "string" ? first.trim() : undefined;
   }
 
@@ -441,7 +465,9 @@ export class TelegramProgressManager {
   }
 
   private truncate(value: string, max: number): string {
-    return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
+    return value.length <= max
+      ? value
+      : `${value.slice(0, Math.max(0, max - 1))}…`;
   }
 
   private formatElapsed(ms: number): string {

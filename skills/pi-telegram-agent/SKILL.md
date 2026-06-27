@@ -35,21 +35,25 @@ The bot registers these command suggestions with Telegram:
 ## systemd Quick Reference
 
 **Status**
+
 ```bash
 systemctl --user status pi-telegram-agent.service
 ```
 
 **Restart / Reload**
+
 ```bash
 systemctl --user restart pi-telegram-agent.service
 ```
 
 **View logs**
+
 ```bash
 journalctl --user -u pi-telegram-agent.service -f
 ```
 
 **Enable on boot**
+
 ```bash
 systemctl --user enable pi-telegram-agent.service
 loginctl enable-linger "$USER"
@@ -57,13 +61,13 @@ loginctl enable-linger "$USER"
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `~/Git/pi-telegram-agent/src/main.ts` | Entry point |
-| `~/Git/pi-telegram-agent/src/bridge.ts` | Telegram ↔ Pi bridge logic, command dispatch |
-| `~/Git/pi-telegram-agent/src/telegram/api.ts` | Telegram Bot API wrapper, `setMyCommands` |
-| `~/.pi/agent/telegram.json` | Bot token, allowed user ID |
-| `~/.pi/agent/telegram-agent.env` | Optional env-file for secrets (e.g. `EXA_API_KEY`) |
+| File                                          | Purpose                                            |
+| --------------------------------------------- | -------------------------------------------------- |
+| `~/Git/pi-telegram-agent/src/main.ts`         | Entry point                                        |
+| `~/Git/pi-telegram-agent/src/bridge.ts`       | Telegram ↔ Pi bridge logic, command dispatch       |
+| `~/Git/pi-telegram-agent/src/telegram/api.ts` | Telegram Bot API wrapper, `setMyCommands`          |
+| `~/.pi/agent/telegram.json`                   | Bot token, allowed user ID                         |
+| `~/.pi/agent/telegram-agent.env`              | Optional env-file for secrets (e.g. `EXA_API_KEY`) |
 
 ## When the user asks
 

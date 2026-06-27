@@ -4,8 +4,8 @@ import { basename } from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { MAX_ATTACHMENTS_PER_TURN } from "../constants.js";
-import type { PendingTelegramTurn } from "../telegram/types.js";
+import { MAX_ATTACHMENTS_PER_TURN } from "../constants";
+import type { PendingTelegramTurn } from "../telegram/types";
 
 export function createTelegramAttachTool(
   getActiveTurn: () => PendingTelegramTurn | undefined,

@@ -1,7 +1,15 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { TEMP_DIR } from "../constants.js";
+import {
+  MAX_MESSAGE_LENGTH,
+  MAX_RICH_MESSAGE_LENGTH,
+  TEMP_DIR,
+} from "../constants";
+import { log } from "../logger";
+import { chunkParagraphs, sanitizeFileName } from "../utils";
+import { formatTelegramText } from "./format";
+import { toTelegramRichMarkdown } from "./rich-markdown";
 import type {
   TelegramApiResponse,
   TelegramConfig,
@@ -9,12 +17,7 @@ import type {
   TelegramInlineKeyboardMarkup,
   TelegramInputRichMessage,
   TelegramSentMessage,
-} from "./types.js";
-import { chunkParagraphs, sanitizeFileName } from "../utils.js";
-import { formatTelegramText } from "./format.js";
-import { toTelegramRichMarkdown } from "./rich-markdown.js";
-import { MAX_MESSAGE_LENGTH, MAX_RICH_MESSAGE_LENGTH } from "../constants.js";
-import { log } from "../logger.js";
+} from "./types";
 
 export class TelegramApi {
   private richMessageSupport: "unknown" | "supported" | "unsupported" =
@@ -298,7 +301,10 @@ export class TelegramApi {
     return { markdown: toTelegramRichMarkdown(text) };
   }
 
-  private handleRichMessageFailure(error: unknown, fallbackAction: string): void {
+  private handleRichMessageFailure(
+    error: unknown,
+    fallbackAction: string,
+  ): void {
     const unsupported = this.isRichMessageUnsupportedError(error);
     if (unsupported) this.richMessageSupport = "unsupported";
     log(
@@ -326,7 +332,10 @@ export class TelegramApi {
   }
 
   private isTooLongError(error: unknown): boolean {
-    return error instanceof Error && /too long|message is too long/i.test(error.message);
+    return (
+      error instanceof Error &&
+      /too long|message is too long/i.test(error.message)
+    );
   }
 
   private formatError(error: unknown): string {

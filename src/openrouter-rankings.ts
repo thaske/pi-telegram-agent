@@ -58,7 +58,7 @@ async function fetchRankingsActionId(): Promise<string> {
     const chunkUrls = Array.from(
       new Set(
         [...html.matchAll(/src="([^"]+\.js\?dpl=[^"]+)"/g)].map(
-          (match) => match[1]!,
+          (match) => match[1],
         ),
       ),
     );

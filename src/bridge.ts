@@ -6,32 +6,28 @@ import type {
   createAgentSessionRuntime,
 } from "@earendil-works/pi-coding-agent";
 
-import {
-  MAX_RICH_MESSAGE_LENGTH,
-  PENDING_TURN_PATH,
-  TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS,
-} from "./constants.js";
-import { log } from "./logger.js";
+import { MAX_RICH_MESSAGE_LENGTH, PENDING_TURN_PATH } from "./constants";
+import { log } from "./logger";
 import {
   extractAssistantText,
   getMessageText,
   isAssistantMessage,
-} from "./pi/session-messages.js";
-import { getOpenRouterPopularityRanks } from "./openrouter-rankings.js";
-import { createTelegramAttachTool } from "./pi/telegram-attach-tool.js";
-import { TelegramApi } from "./telegram/api.js";
-import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files.js";
-import { TelegramPreviewManager } from "./telegram/preview.js";
-import { TelegramProgressManager } from "./telegram/progress.js";
+} from "./pi/session-messages";
+import { createTelegramAttachTool } from "./pi/telegram-attach-tool";
+import { createTelegramUiContext } from "./pi/ui-context";
+import { TelegramApi } from "./telegram/api";
+import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files";
+import { TelegramMediaGroupBuffer } from "./telegram/media-groups";
+import { TelegramModelPicker } from "./telegram/model-picker";
+import { TelegramPreviewManager } from "./telegram/preview";
+import { TelegramProgressManager } from "./telegram/progress";
 import type {
   PendingTelegramTurn,
   TelegramCallbackQuery,
   TelegramConfig,
-  TelegramInlineKeyboardMarkup,
-  TelegramMediaGroupState,
   TelegramMessage,
   TelegramUpdate,
-} from "./telegram/types.js";
+} from "./telegram/types";
 
 type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 
@@ -47,9 +43,8 @@ export class TelegramBridge {
   private queuedTelegramTurns: PendingTelegramTurn[] = [];
   private activeTelegramTurn: PendingTelegramTurn | undefined;
   private preserveQueuedTurnsAsHistory = false;
-  private mediaGroups = new Map<string, TelegramMediaGroupState>();
-  private pendingModelSearchChats = new Set<number>();
-  private modelPickerQueries = new Map<number, string>();
+  private readonly mediaGroups: TelegramMediaGroupBuffer;
+  private readonly modelPicker: TelegramModelPicker;
 
   constructor(
     private readonly config: TelegramConfig,
@@ -59,6 +54,12 @@ export class TelegramBridge {
     this.api = new TelegramApi(() => this.config);
     this.preview = new TelegramPreviewManager(this.api);
     this.progress = new TelegramProgressManager(this.api);
+    this.mediaGroups = new TelegramMediaGroupBuffer((messages) =>
+      this.dispatchAuthorizedTelegramMessages(messages),
+    );
+    this.modelPicker = new TelegramModelPicker(this.api, () =>
+      this.requireSession(),
+    );
   }
 
   get currentSession(): AgentSession | undefined {
@@ -75,49 +76,10 @@ export class TelegramBridge {
     this.session = runtime.session;
     const session = this.session;
     await session.bindExtensions({
-      uiContext: {
-        select: async () => undefined,
-        confirm: async () => false,
-        input: async () => undefined,
-        notify: (m, t) => {
-          log(`notify:${t ?? "info"}: ${m}`);
-          if (this.activeTelegramTurn)
-            this.progress.setStatus(`notify:${t ?? "info"}`, m);
-        },
-        onTerminalInput: () => () => undefined,
-        setStatus: (key, text) => this.progress.setStatus(key, text),
-        setWorkingMessage: (message) => this.progress.setWorkingMessage(message),
-        setWorkingVisible: () => undefined,
-        setWorkingIndicator: () => undefined,
-        setHiddenThinkingLabel: (label) => this.progress.setHiddenThinkingLabel(label),
-        setWidget: () => undefined,
-        setFooter: () => undefined,
-        setHeader: () => undefined,
-        setTitle: () => undefined,
-        custom: async <T>() => undefined as T,
-        pasteToEditor: () => undefined,
-        setEditorText: () => undefined,
-        getEditorText: () => "",
-        editor: async () => undefined,
-        addAutocompleteProvider: () => undefined,
-        setEditorComponent: () => undefined,
-        getEditorComponent: () => undefined,
-        get theme() {
-          return {
-            fg: (_color: string, text: string) => text,
-            bg: (_color: string, text: string) => text,
-            bold: (text: string) => text,
-            dim: (text: string) => text,
-            italic: (text: string) => text,
-            underline: (text: string) => text,
-          } as never;
-        },
-        getAllThemes: () => [],
-        getTheme: () => undefined,
-        setTheme: () => ({ success: false, error: "not supported" }),
-        getToolsExpanded: () => false,
-        setToolsExpanded: () => undefined,
-      },
+      uiContext: createTelegramUiContext(
+        this.progress,
+        () => this.activeTelegramTurn !== undefined,
+      ),
       commandContextActions: {
         waitForIdle: () => session.agent.waitForIdle(),
         newSession: (options) => runtime.newSession(options),
@@ -195,6 +157,7 @@ export class TelegramBridge {
     this.preview.stopTypingLoop();
     this.progress.discard();
     this.unsubscribe?.();
+    this.mediaGroups.discard();
     if (this.activeTelegramTurn) {
       await this.savePendingTurn();
       await this.preview
@@ -220,7 +183,9 @@ export class TelegramBridge {
     this.preview.startTypingLoop(turn.chatId);
     void session.sendUserMessage(turn.content).catch(async (error) => {
       this.preview.stopTypingLoop();
-      this.progress.fail(error instanceof Error ? error.message : String(error));
+      this.progress.fail(
+        error instanceof Error ? error.message : String(error),
+      );
       this.activeTelegramTurn = undefined;
       await this.clearPendingTurn();
       await this.preview.clear(turn.chatId);
@@ -244,10 +209,10 @@ export class TelegramBridge {
       "";
     const lower = rawText.toLowerCase();
     if (
-      this.pendingModelSearchChats.has(firstMessage.chat.id) &&
+      this.modelPicker.hasPendingSearch(firstMessage.chat.id) &&
       !lower.startsWith("/")
     ) {
-      this.pendingModelSearchChats.delete(firstMessage.chat.id);
+      this.modelPicker.consumePendingSearch(firstMessage.chat.id);
       if (session.isStreaming) {
         await this.api.sendTextReply(
           firstMessage.chat.id,
@@ -256,7 +221,7 @@ export class TelegramBridge {
         );
         return;
       }
-      await this.showFilteredModelPicker(
+      await this.modelPicker.showFiltered(
         firstMessage.chat.id,
         firstMessage.message_id,
         rawText,
@@ -317,7 +282,10 @@ export class TelegramBridge {
         );
         return;
       }
-      await this.showModelPicker(firstMessage.chat.id, firstMessage.message_id);
+      await this.modelPicker.show(
+        firstMessage.chat.id,
+        firstMessage.message_id,
+      );
       return;
     }
     if (lower.startsWith("/model ") || lower.startsWith("model ")) {
@@ -330,7 +298,7 @@ export class TelegramBridge {
         return;
       }
       const query = rawText.replace(/^\/?model\s+/i, "").trim();
-      await this.selectModelByQuery(
+      await this.modelPicker.selectByQuery(
         firstMessage.chat.id,
         firstMessage.message_id,
         query,
@@ -407,203 +375,8 @@ export class TelegramBridge {
   private async handleAuthorizedTelegramMessage(
     message: TelegramMessage,
   ): Promise<void> {
-    if (message.media_group_id) {
-      const key = `${message.chat.id}:${message.media_group_id}`;
-      const existing = this.mediaGroups.get(key) ?? { messages: [] };
-      existing.messages.push(message);
-      if (existing.flushTimer) clearTimeout(existing.flushTimer);
-      existing.flushTimer = setTimeout(() => {
-        const state = this.mediaGroups.get(key);
-        this.mediaGroups.delete(key);
-        if (state) void this.dispatchAuthorizedTelegramMessages(state.messages);
-      }, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
-      this.mediaGroups.set(key, existing);
-      return;
-    }
+    if (this.mediaGroups.handle(message)) return;
     await this.dispatchAuthorizedTelegramMessages([message]);
-  }
-
-  private async getAvailableModels(query?: string) {
-    const normalized = query?.trim().toLowerCase();
-    const ranks = await getOpenRouterPopularityRanks().catch(() => undefined);
-    return this.requireSession()
-      .modelRegistry.getAvailable()
-      .filter((model) => {
-        if (!normalized) return true;
-        return [model.provider, model.id, model.name, `${model.provider}/${model.id}`]
-          .join(" ")
-          .toLowerCase()
-          .includes(normalized);
-      })
-      .sort((a, b) => {
-        const rankA = this.getOpenRouterRank(a, ranks);
-        const rankB = this.getOpenRouterRank(b, ranks);
-        if (rankA !== rankB) return rankA - rankB;
-        return `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`);
-      });
-  }
-
-  private getOpenRouterRank(
-    model: { provider: string; id: string },
-    ranks: Map<string, number> | undefined,
-  ): number {
-    if (!ranks) return Number.MAX_SAFE_INTEGER;
-    const keys =
-      model.provider === "openrouter"
-        ? [model.id]
-        : [`${model.provider}/${model.id}`];
-    for (const key of keys) {
-      const rank = ranks.get(key.toLowerCase());
-      if (rank !== undefined) return rank;
-    }
-    return Number.MAX_SAFE_INTEGER;
-  }
-
-  private async modelPickerMarkup(
-    chatId: number,
-    page: number,
-  ): Promise<TelegramInlineKeyboardMarkup> {
-    const activeQuery = this.modelPickerQueries.get(chatId);
-    const models = await this.getAvailableModels(activeQuery);
-    const pageSize = 8;
-    const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
-    const safePage = Math.min(Math.max(page, 0), pageCount - 1);
-    const current = this.requireSession().model;
-    const rows = models
-      .slice(safePage * pageSize, safePage * pageSize + pageSize)
-      .map((model, i) => {
-        const index = safePage * pageSize + i;
-        const selected =
-          current?.provider === model.provider && current?.id === model.id;
-        return [
-          {
-            text: `${selected ? "✓ " : ""}${model.name} (${model.provider})`,
-            callback_data: `model:set:${index}`,
-          },
-        ];
-      });
-    rows.push([
-      { text: "🔎 Search", callback_data: "model:search" },
-      ...(activeQuery
-        ? [{ text: "Clear", callback_data: "model:clear" }]
-        : []),
-    ]);
-    if (pageCount > 1) {
-      rows.push([
-        {
-          text: "‹ Prev",
-          callback_data: `model:page:${(safePage - 1 + pageCount) % pageCount}`,
-        },
-        { text: `${safePage + 1}/${pageCount}`, callback_data: "model:noop" },
-        {
-          text: "Next ›",
-          callback_data: `model:page:${(safePage + 1) % pageCount}`,
-        },
-      ]);
-    }
-    return { inline_keyboard: rows };
-  }
-
-  private modelPickerText(chatId: number): string {
-    const session = this.requireSession();
-    const current = session.model
-      ? `${session.model.provider}/${session.model.id}`
-      : "unknown";
-    const activeQuery = this.modelPickerQueries.get(chatId);
-    return [
-      `Choose a Pi model. Current: ${current}`,
-      activeQuery ? `Search: ${activeQuery}` : undefined,
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  private async showModelPicker(
-    chatId: number,
-    replyToMessageId: number,
-    page = 0,
-  ): Promise<void> {
-    if ((await this.getAvailableModels()).length === 0) {
-      await this.api.sendTextReply(
-        chatId,
-        replyToMessageId,
-        "No authenticated models are available in Pi config.",
-      );
-      return;
-    }
-    await this.api.sendMessage(
-      chatId,
-      this.modelPickerText(chatId),
-      await this.modelPickerMarkup(chatId, page),
-    );
-  }
-
-  private async showFilteredModelPicker(
-    chatId: number,
-    replyToMessageId: number,
-    query: string,
-  ): Promise<void> {
-    const trimmed = query.trim();
-    if (!trimmed) {
-      this.modelPickerQueries.delete(chatId);
-      await this.showModelPicker(chatId, replyToMessageId);
-      return;
-    }
-    const matches = await this.getAvailableModels(trimmed);
-    if (matches.length === 0) {
-      await this.api.sendTextReply(
-        chatId,
-        replyToMessageId,
-        `No available model matched "${trimmed}". Try another search or send /model.`,
-      );
-      return;
-    }
-    this.modelPickerQueries.set(chatId, trimmed);
-    await this.showModelPicker(chatId, replyToMessageId);
-  }
-
-  private async selectModelByIndex(
-    chatId: number,
-    index: number,
-  ): Promise<string> {
-    const session = this.requireSession();
-    const model = (await this.getAvailableModels(this.modelPickerQueries.get(chatId)))[
-      index
-    ];
-    if (!model) return "That model selection is no longer available.";
-    await session.setModel(model);
-    return `Model changed to ${model.provider}/${model.id}.`;
-  }
-
-  private async selectModelByQuery(
-    chatId: number,
-    replyToMessageId: number,
-    query: string,
-  ): Promise<void> {
-    const normalized = query.toLowerCase();
-    const allMatches = await this.getAvailableModels(query);
-    const exact = allMatches.find(
-      (model) => `${model.provider}/${model.id}`.toLowerCase() === normalized,
-    );
-    if (exact) {
-      await this.requireSession().setModel(exact);
-      await this.api.sendTextReply(
-        chatId,
-        replyToMessageId,
-        `Model changed to ${exact.provider}/${exact.id}.`,
-      );
-      return;
-    }
-    if (allMatches.length === 1) {
-      await this.requireSession().setModel(allMatches[0]!);
-      await this.api.sendTextReply(
-        chatId,
-        replyToMessageId,
-        `Model changed to ${allMatches[0]!.provider}/${allMatches[0]!.id}.`,
-      );
-      return;
-    }
-    await this.showFilteredModelPicker(chatId, replyToMessageId, query);
   }
 
   private async handleAuthorizedCallbackQuery(
@@ -624,63 +397,7 @@ export class TelegramBridge {
       }
       return;
     }
-    if (!data.startsWith("model:")) return;
-    if (this.requireSession().isStreaming) {
-      await this.api.answerCallbackQuery(
-        query.id,
-        "Pi is busy. Send /stop first.",
-      );
-      return;
-    }
-    const [, action, value] = data.split(":");
-    if (action === "noop") {
-      await this.api.answerCallbackQuery(query.id);
-      return;
-    }
-    if (action === "search") {
-      this.pendingModelSearchChats.add(message.chat.id);
-      await this.api.answerCallbackQuery(query.id, "Send search terms");
-      await this.api.sendMessage(
-        message.chat.id,
-        "Send model search terms, e.g. `opus`, `gpt`, `anthropic`, or `gemini`.",
-      );
-      return;
-    }
-    if (action === "clear") {
-      this.modelPickerQueries.delete(message.chat.id);
-      await this.api.editMessageText(
-        message.chat.id,
-        message.message_id,
-        this.modelPickerText(message.chat.id),
-        await this.modelPickerMarkup(message.chat.id, 0),
-      );
-      await this.api.answerCallbackQuery(query.id, "Search cleared");
-      return;
-    }
-    if (action === "page") {
-      const page = Number(value ?? 0);
-      await this.api.editMessageText(
-        message.chat.id,
-        message.message_id,
-        this.modelPickerText(message.chat.id),
-        await this.modelPickerMarkup(
-          message.chat.id,
-          Number.isFinite(page) ? page : 0,
-        ),
-      );
-      await this.api.answerCallbackQuery(query.id);
-      return;
-    }
-    if (action === "set") {
-      const index = Number(value);
-      const text = await this.selectModelByIndex(
-        message.chat.id,
-        Number.isFinite(index) ? index : -1,
-      );
-      this.modelPickerQueries.delete(message.chat.id);
-      await this.api.editMessageText(message.chat.id, message.message_id, text);
-      await this.api.answerCallbackQuery(query.id, text);
-    }
+    await this.modelPicker.handleCallbackQuery(query);
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
@@ -732,15 +449,26 @@ export class TelegramBridge {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const turn = this.activeTelegramTurn;
-    if (event.type === "message_start" && turn && isAssistantMessage(event.message)) {
+    if (
+      event.type === "message_start" &&
+      turn &&
+      isAssistantMessage(event.message)
+    ) {
       this.progress.markAssistantStreaming();
       if (this.preview.hasVisibleText())
         void this.preview.finalize(turn.chatId);
       this.preview.reset();
     }
-    if (event.type === "message_update" && turn && isAssistantMessage(event.message)) {
+    if (
+      event.type === "message_update" &&
+      turn &&
+      isAssistantMessage(event.message)
+    ) {
       const assistantEvent = event.assistantMessageEvent;
-      if (assistantEvent.type === "thinking_start" || assistantEvent.type === "thinking_delta")
+      if (
+        assistantEvent.type === "thinking_start" ||
+        assistantEvent.type === "thinking_delta"
+      )
         this.progress.markThinking(true);
       else if (assistantEvent.type === "thinking_end")
         this.progress.markThinking(false);
@@ -763,7 +491,10 @@ export class TelegramBridge {
         event.isError,
       );
     if (event.type === "compaction_start")
-      this.progress.setStatus("compaction", `Compacting context (${event.reason})…`);
+      this.progress.setStatus(
+        "compaction",
+        `Compacting context (${event.reason})…`,
+      );
     if (event.type === "compaction_end")
       this.progress.setStatus(
         "compaction",
@@ -781,7 +512,9 @@ export class TelegramBridge {
     if (event.type === "auto_retry_end")
       this.progress.setStatus(
         "retry",
-        event.success ? "Retry succeeded" : event.finalError ?? "Retry failed",
+        event.success
+          ? "Retry succeeded"
+          : (event.finalError ?? "Retry failed"),
       );
     if (event.type === "agent_end") {
       void (async () => {
@@ -803,13 +536,15 @@ export class TelegramBridge {
           }
           if (assistant.stopReason === "error") {
             this.progress.fail(
-              assistant.errorMessage || "Pi failed while processing the request.",
+              assistant.errorMessage ||
+                "Pi failed while processing the request.",
             );
             await this.preview.clear(doneTurn.chatId);
             await this.api.sendTextReply(
               doneTurn.chatId,
               doneTurn.replyToMessageId,
-              assistant.errorMessage || "Pi failed while processing the request.",
+              assistant.errorMessage ||
+                "Pi failed while processing the request.",
             );
             void this.startNextTurnIfIdle();
             return;

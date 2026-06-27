@@ -2,8 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { CONFIG_PATH } from "./constants.js";
-import type { TelegramConfig } from "./telegram/types.js";
+import { CONFIG_PATH } from "./constants";
+import type { TelegramConfig } from "./telegram/types";
 
 export async function readConfig(): Promise<TelegramConfig> {
   try {
