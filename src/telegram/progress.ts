@@ -283,68 +283,86 @@ export class TelegramProgressManager {
 
   private render(state: ProgressState): string {
     const elapsed = this.formatElapsed(Date.now() - state.startedAt);
-    const runningTools = state.tools.filter((tool) => tool.state === "running");
-    const failedTools = state.tools.filter((tool) => tool.state === "error");
-    const completedTools = state.tools.filter((tool) => tool.state === "done");
-    const toolCount = state.tools.length;
-    const status = state.failed
-      ? "❌ Error"
-      : state.completed
-        ? "✅ Done"
-        : runningTools.length
-          ? "🛠 Using tools"
-          : state.thinkingActive
-            ? "💭 Thinking"
-            : state.assistantStreaming
-              ? "✍️ Writing"
-              : "🔄 Working";
+    const lines: string[] = [`${this.statusLabel(state)}  ·  ${elapsed}`];
 
-    const lines: string[] = [`${status}  ·  ${elapsed}`];
     if (!state.completed) lines.push("Stop anytime: /stop");
-
-    const current = state.workingMessage ?? this.currentActivity(state);
-    if (current) {
-      lines.push("", "▸ Current", this.indent(this.truncate(current, 180)));
-    }
-
-    if (toolCount) {
-      const failed = failedTools.length
-        ? ` · ${failedTools.length} failed`
-        : "";
-      lines.push(
-        "",
-        `▸ Tools  ${completedTools.length}/${toolCount} done${failed}`,
-      );
-      const visibleTools = state.tools.slice(-5);
-      const hidden = state.tools.length - visibleTools.length;
-      if (hidden > 0)
-        lines.push(
-          this.indent(
-            `… ${hidden} earlier tool call${hidden === 1 ? "" : "s"}`,
-          ),
-        );
-      for (const tool of visibleTools) lines.push(...this.renderTool(tool));
-    } else if (state.thinkingSeen) {
-      lines.push(
-        "",
-        "▸ Thinking",
-        this.indent(
-          state.hiddenThinkingLabel ??
-            "Reasoning privately — raw chain-of-thought is hidden.",
-        ),
-      );
-    }
-
-    const visibleStatuses = [...state.statuses.entries()].slice(-2);
-    if (visibleStatuses.length) {
-      lines.push("", "▸ Notes");
-      for (const [key, value] of visibleStatuses)
-        lines.push(this.indent(this.truncate(`${key}: ${value}`, 140)));
-    }
-
-    if (state.failed)
-      lines.push("", "▸ Error", this.indent(this.truncate(state.failed, 500)));
+    this.addCurrentSection(lines, state);
+    this.addToolOrThinkingSection(lines, state);
+    this.addStatusSection(lines, state);
+    this.addFailureSection(lines, state);
     return lines.join("\n");
+  }
+
+  private statusLabel(state: ProgressState): string {
+    if (state.failed) return "❌ Error";
+    if (state.completed) return "✅ Done";
+    if (state.tools.some((tool) => tool.state === "running")) {
+      return "🛠 Using tools";
+    }
+    if (state.thinkingActive) return "💭 Thinking";
+    if (state.assistantStreaming) return "✍️ Writing";
+    return "🔄 Working";
+  }
+
+  private addCurrentSection(lines: string[], state: ProgressState): void {
+    const current = state.workingMessage ?? this.currentActivity(state);
+    if (!current) return;
+    lines.push("", "▸ Current", this.indent(this.truncate(current, 180)));
+  }
+
+  private addToolOrThinkingSection(
+    lines: string[],
+    state: ProgressState,
+  ): void {
+    if (state.tools.length) {
+      this.addToolSection(lines, state);
+      return;
+    }
+    if (!state.thinkingSeen) return;
+    lines.push("", "▸ Thinking", this.indent(this.thinkingLabel(state)));
+  }
+
+  private addToolSection(lines: string[], state: ProgressState): void {
+    const completed = state.tools.filter((tool) => tool.state === "done").length;
+    const failed = state.tools.filter((tool) => tool.state === "error").length;
+    const failureLabel = failed ? ` · ${failed} failed` : "";
+    lines.push(
+      "",
+      `▸ Tools  ${completed}/${state.tools.length} done${failureLabel}`,
+    );
+
+    const visibleTools = state.tools.slice(-5);
+    this.addHiddenToolCount(lines, state.tools.length - visibleTools.length);
+    for (const tool of visibleTools) lines.push(...this.renderTool(tool));
+  }
+
+  private addHiddenToolCount(lines: string[], hidden: number): void {
+    if (hidden <= 0) return;
+    lines.push(
+      this.indent(`… ${hidden} earlier tool call${hidden === 1 ? "" : "s"}`),
+    );
+  }
+
+  private addStatusSection(lines: string[], state: ProgressState): void {
+    const visibleStatuses = [...state.statuses.entries()].slice(-2);
+    if (!visibleStatuses.length) return;
+
+    lines.push("", "▸ Notes");
+    for (const [key, value] of visibleStatuses) {
+      lines.push(this.indent(this.truncate(`${key}: ${value}`, 140)));
+    }
+  }
+
+  private addFailureSection(lines: string[], state: ProgressState): void {
+    if (!state.failed) return;
+    lines.push("", "▸ Error", this.indent(this.truncate(state.failed, 500)));
+  }
+
+  private thinkingLabel(state: ProgressState): string {
+    return (
+      state.hiddenThinkingLabel ??
+      "Reasoning privately — raw chain-of-thought is hidden."
+    );
   }
 
   private currentActivity(state: ProgressState): string | undefined {

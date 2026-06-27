@@ -16,6 +16,7 @@ import {
 import { createTelegramAttachTool } from "./pi/telegram-attach-tool";
 import { createTelegramUiContext } from "./pi/ui-context";
 import { TelegramApi } from "./telegram/api";
+import { TelegramCommandHandler } from "./telegram/commands";
 import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files";
 import { TelegramMediaGroupBuffer } from "./telegram/media-groups";
 import { TelegramModelPicker } from "./telegram/model-picker";
@@ -30,6 +31,7 @@ import type {
 } from "./telegram/types";
 
 type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
+type AgentEndEvent = Extract<AgentSessionEvent, { type: "agent_end" }>;
 
 export class TelegramBridge {
   readonly api: TelegramApi;
@@ -43,6 +45,7 @@ export class TelegramBridge {
   private queuedTelegramTurns: PendingTelegramTurn[] = [];
   private activeTelegramTurn: PendingTelegramTurn | undefined;
   private preserveQueuedTurnsAsHistory = false;
+  private readonly commandHandler: TelegramCommandHandler;
   private readonly mediaGroups: TelegramMediaGroupBuffer;
   private readonly modelPicker: TelegramModelPicker;
 
@@ -59,6 +62,26 @@ export class TelegramBridge {
     );
     this.modelPicker = new TelegramModelPicker(this.api, () =>
       this.requireSession(),
+    );
+    this.commandHandler = new TelegramCommandHandler(
+      this.api,
+      this.modelPicker,
+      {
+        bindSession: () => this.bindSession(),
+        clearActiveTurn: () => {
+          this.activeTelegramTurn = undefined;
+        },
+        clearQueuedTurns: () => {
+          this.queuedTelegramTurns = [];
+        },
+        discardPreview: () => this.preview.discard(),
+        getQueueLength: () => this.queuedTelegramTurns.length,
+        getSession: () => this.requireSession(),
+        newSession: () => this.requireRuntime().newSession(),
+        preserveQueuedTurnsAsHistory: () => {
+          this.preserveQueuedTurnsAsHistory = true;
+        },
+      },
     );
   }
 
@@ -201,167 +224,8 @@ export class TelegramBridge {
   private async dispatchAuthorizedTelegramMessages(
     messages: TelegramMessage[],
   ): Promise<void> {
-    const session = this.requireSession();
-    const firstMessage = messages[0];
-    if (!firstMessage) return;
-    const rawText =
-      messages.map((m) => (m.text || m.caption || "").trim()).find(Boolean) ||
-      "";
-    const lower = rawText.toLowerCase();
-    if (
-      this.modelPicker.hasPendingSearch(firstMessage.chat.id) &&
-      !lower.startsWith("/")
-    ) {
-      this.modelPicker.consumePendingSearch(firstMessage.chat.id);
-      if (session.isStreaming) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Cannot change models while pi is busy. Send /stop first.",
-        );
-        return;
-      }
-      await this.modelPicker.showFiltered(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        rawText,
-      );
-      return;
-    }
-    if (lower === "stop" || lower === "/stop") {
-      if (session.isStreaming) {
-        if (this.queuedTelegramTurns.length)
-          this.preserveQueuedTurnsAsHistory = true;
-        await session.abort();
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Aborted current turn.",
-        );
-      } else
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "No active turn.",
-        );
-      return;
-    }
-    if (lower === "/new" || lower === "new" || lower === "/reset") {
-      if (session.isStreaming) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Cannot start a new chat while pi is busy. Send /stop first.",
-        );
-        return;
-      }
-      await this.api.sendTextReply(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        "Starting a new Pi chat...",
-      );
-      this.queuedTelegramTurns = [];
-      this.activeTelegramTurn = undefined;
-      this.preview.discard();
-      const result = await this.requireRuntime().newSession();
-      if (!result.cancelled)
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "New Pi chat started.",
-        );
-      await this.bindSession();
-      return;
-    }
-    if (lower === "/model" || lower === "model") {
-      if (session.isStreaming) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Cannot change models while pi is busy. Send /stop first.",
-        );
-        return;
-      }
-      await this.modelPicker.show(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-      );
-      return;
-    }
-    if (lower.startsWith("/model ") || lower.startsWith("model ")) {
-      if (session.isStreaming) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Cannot change models while pi is busy. Send /stop first.",
-        );
-        return;
-      }
-      const query = rawText.replace(/^\/?model\s+/i, "").trim();
-      await this.modelPicker.selectByQuery(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        query,
-      );
-      return;
-    }
-    if (lower === "/compact") {
-      if (session.isStreaming) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Cannot compact while pi is busy. Send /stop first.",
-        );
-        return;
-      }
-      await this.api.sendTextReply(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        "Compaction started.",
-      );
-      try {
-        await session.compact();
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          "Compaction completed.",
-        );
-      } catch (e) {
-        await this.api.sendTextReply(
-          firstMessage.chat.id,
-          firstMessage.message_id,
-          `Compaction failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-      return;
-    }
-    if (lower === "/status") {
-      const stats = session.getSessionStats();
-      const usage = session.getContextUsage();
-      const lines = [
-        `Model: ${session.model ? `${session.model.provider}/${session.model.id}` : "unknown"}`,
-        `Messages: ${stats.totalMessages}`,
-        `Cost: $${stats.cost.toFixed(3)}`,
-      ];
-      if (usage)
-        lines.push(
-          `Context: ${usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?"}/${usage.contextWindow ?? session.model?.contextWindow ?? "?"}`,
-        );
-      await this.api.sendTextReply(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        lines.join("\n"),
-      );
-      return;
-    }
-    if (lower === "/start") {
-      await this.api.sendTextReply(
-        firstMessage.chat.id,
-        firstMessage.message_id,
-        "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop.",
-      );
-      return;
-    }
+    if (await this.commandHandler.handle(messages)) return;
+
     const historyTurns = this.preserveQueuedTurnsAsHistory
       ? this.queuedTelegramTurns.splice(0)
       : [];
@@ -448,143 +312,181 @@ export class TelegramBridge {
   }
 
   private onSessionEvent(event: AgentSessionEvent): void {
+    this.handleMessageSessionEvent(event);
+    this.handleToolSessionEvent(event);
+    this.handleStatusSessionEvent(event);
+    if (event.type === "agent_end") void this.handleAgentEnd(event);
+  }
+
+  private handleMessageSessionEvent(event: AgentSessionEvent): void {
     const turn = this.activeTelegramTurn;
-    if (
-      event.type === "message_start" &&
-      turn &&
-      isAssistantMessage(event.message)
-    ) {
+    if (!turn) return;
+
+    if (event.type === "message_start") {
+      if (!isAssistantMessage(event.message)) return;
       this.progress.markAssistantStreaming();
-      if (this.preview.hasVisibleText())
-        void this.preview.finalize(turn.chatId);
+      if (this.preview.hasVisibleText()) void this.preview.finalize(turn.chatId);
       this.preview.reset();
+      return;
     }
+
+    if (event.type !== "message_update" || !isAssistantMessage(event.message)) {
+      return;
+    }
+
+    const assistantEvent = event.assistantMessageEvent;
     if (
-      event.type === "message_update" &&
-      turn &&
-      isAssistantMessage(event.message)
+      assistantEvent.type === "thinking_start" ||
+      assistantEvent.type === "thinking_delta"
     ) {
-      const assistantEvent = event.assistantMessageEvent;
-      if (
-        assistantEvent.type === "thinking_start" ||
-        assistantEvent.type === "thinking_delta"
-      )
-        this.progress.markThinking(true);
-      else if (assistantEvent.type === "thinking_end")
-        this.progress.markThinking(false);
-      else if (assistantEvent.type.startsWith("text_"))
-        this.progress.markAssistantStreaming();
-      else if (assistantEvent.type.startsWith("toolcall_"))
-        this.progress.setStatus("tool-call", "Preparing a tool call…");
-      this.preview.pendingText = getMessageText(event.message);
-      this.preview.scheduleFlush(turn.chatId);
+      this.progress.markThinking(true);
+    } else if (assistantEvent.type === "thinking_end") {
+      this.progress.markThinking(false);
+    } else if (assistantEvent.type.startsWith("text_")) {
+      this.progress.markAssistantStreaming();
+    } else if (assistantEvent.type.startsWith("toolcall_")) {
+      this.progress.setStatus("tool-call", "Preparing a tool call…");
     }
-    if (event.type === "tool_execution_start")
-      this.progress.toolStart(event.toolCallId, event.toolName, event.args);
-    if (event.type === "tool_execution_update")
-      this.progress.toolUpdate(event.toolCallId, event.toolName, event.args);
-    if (event.type === "tool_execution_end")
-      this.progress.toolEnd(
-        event.toolCallId,
-        event.toolName,
-        event.result,
-        event.isError,
-      );
-    if (event.type === "compaction_start")
-      this.progress.setStatus(
-        "compaction",
-        `Compacting context (${event.reason})…`,
-      );
-    if (event.type === "compaction_end")
-      this.progress.setStatus(
-        "compaction",
-        event.aborted
-          ? "Compaction aborted"
-          : event.errorMessage
-            ? `Compaction failed: ${event.errorMessage}`
-            : "Compaction complete",
-      );
-    if (event.type === "auto_retry_start")
-      this.progress.setStatus(
-        "retry",
-        `Retrying after error (${event.attempt}/${event.maxAttempts})…`,
-      );
-    if (event.type === "auto_retry_end")
-      this.progress.setStatus(
-        "retry",
-        event.success
-          ? "Retry succeeded"
-          : (event.finalError ?? "Retry failed"),
-      );
-    if (event.type === "agent_end") {
-      void (async () => {
-        const doneTurn = this.activeTelegramTurn;
-        this.preview.stopTypingLoop();
-        this.activeTelegramTurn = undefined;
-        await this.clearPendingTurn();
-        if (!doneTurn) {
-          void this.startNextTurnIfIdle();
-          return;
-        }
-        try {
-          const assistant = extractAssistantText(event.messages);
-          if (assistant.stopReason === "aborted") {
-            this.progress.complete();
-            await this.preview.clear(doneTurn.chatId);
-            void this.startNextTurnIfIdle();
-            return;
-          }
-          if (assistant.stopReason === "error") {
-            this.progress.fail(
-              assistant.errorMessage ||
-                "Pi failed while processing the request.",
-            );
-            await this.preview.clear(doneTurn.chatId);
-            await this.api.sendTextReply(
-              doneTurn.chatId,
-              doneTurn.replyToMessageId,
-              assistant.errorMessage ||
-                "Pi failed while processing the request.",
-            );
-            void this.startNextTurnIfIdle();
-            return;
-          }
-          this.progress.complete();
-          const finalText = assistant.text;
-          if (this.preview.hasPreview)
-            this.preview.pendingText =
-              finalText ?? this.preview.pendingText ?? "";
-          if (finalText && finalText.length <= MAX_RICH_MESSAGE_LENGTH)
-            await this.preview.finalize(doneTurn.chatId);
-          else {
-            await this.preview.clear(doneTurn.chatId);
-            if (finalText)
-              await this.api.sendTextReply(
-                doneTurn.chatId,
-                doneTurn.replyToMessageId,
-                finalText,
-              );
-          }
-          await sendQueuedAttachments(this.api, doneTurn);
-        } catch (error) {
-          log(
-            `agent_end send error: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          this.progress.fail(
-            `Failed to send response: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          await this.preview.clear(doneTurn.chatId).catch(() => undefined);
-          await this.api
-            .sendTextReply(
-              doneTurn.chatId,
-              doneTurn.replyToMessageId,
-              `Failed to send response: ${error instanceof Error ? error.message : String(error)}`,
-            )
-            .catch(() => undefined);
-        }
-        void this.startNextTurnIfIdle();
-      })();
+    this.preview.pendingText = getMessageText(event.message);
+    this.preview.scheduleFlush(turn.chatId);
+  }
+
+  private handleToolSessionEvent(event: AgentSessionEvent): void {
+    switch (event.type) {
+      case "tool_execution_start":
+        this.progress.toolStart(event.toolCallId, event.toolName, event.args);
+        return;
+      case "tool_execution_update":
+        this.progress.toolUpdate(event.toolCallId, event.toolName, event.args);
+        return;
+      case "tool_execution_end":
+        this.progress.toolEnd(
+          event.toolCallId,
+          event.toolName,
+          event.result,
+          event.isError,
+        );
     }
+  }
+
+  private handleStatusSessionEvent(event: AgentSessionEvent): void {
+    switch (event.type) {
+      case "compaction_start":
+        this.progress.setStatus(
+          "compaction",
+          `Compacting context (${event.reason})…`,
+        );
+        return;
+      case "compaction_end":
+        this.progress.setStatus("compaction", this.compactionStatus(event));
+        return;
+      case "auto_retry_start":
+        this.progress.setStatus(
+          "retry",
+          `Retrying after error (${event.attempt}/${event.maxAttempts})…`,
+        );
+        return;
+      case "auto_retry_end":
+        this.progress.setStatus(
+          "retry",
+          event.success
+            ? "Retry succeeded"
+            : (event.finalError ?? "Retry failed"),
+        );
+    }
+  }
+
+  private compactionStatus(
+    event: Extract<AgentSessionEvent, { type: "compaction_end" }>,
+  ): string {
+    if (event.aborted) return "Compaction aborted";
+    return event.errorMessage
+      ? `Compaction failed: ${event.errorMessage}`
+      : "Compaction complete";
+  }
+
+  private async handleAgentEnd(event: AgentEndEvent): Promise<void> {
+    const doneTurn = this.activeTelegramTurn;
+    this.preview.stopTypingLoop();
+    this.activeTelegramTurn = undefined;
+    await this.clearPendingTurn();
+    if (!doneTurn) {
+      void this.startNextTurnIfIdle();
+      return;
+    }
+
+    try {
+      await this.sendCompletedTurn(event, doneTurn);
+    } catch (error) {
+      await this.reportAgentEndSendError(doneTurn, error);
+    }
+    void this.startNextTurnIfIdle();
+  }
+
+  private async sendCompletedTurn(
+    event: AgentEndEvent,
+    doneTurn: PendingTelegramTurn,
+  ): Promise<void> {
+    const assistant = extractAssistantText(event.messages);
+    if (assistant.stopReason === "aborted") {
+      this.progress.complete();
+      await this.preview.clear(doneTurn.chatId);
+      return;
+    }
+
+    if (assistant.stopReason === "error") {
+      await this.sendAssistantError(
+        doneTurn,
+        assistant.errorMessage || "Pi failed while processing the request.",
+      );
+      return;
+    }
+
+    this.progress.complete();
+    await this.sendAssistantText(doneTurn, assistant.text);
+    await sendQueuedAttachments(this.api, doneTurn);
+  }
+
+  private async sendAssistantError(
+    turn: PendingTelegramTurn,
+    message: string,
+  ): Promise<void> {
+    this.progress.fail(message);
+    await this.preview.clear(turn.chatId);
+    await this.api.sendTextReply(turn.chatId, turn.replyToMessageId, message);
+  }
+
+  private async sendAssistantText(
+    turn: PendingTelegramTurn,
+    text: string | undefined,
+  ): Promise<void> {
+    if (this.preview.hasPreview) {
+      this.preview.pendingText = text ?? this.preview.pendingText ?? "";
+    }
+    if (text && text.length <= MAX_RICH_MESSAGE_LENGTH) {
+      await this.preview.finalize(turn.chatId);
+      return;
+    }
+
+    await this.preview.clear(turn.chatId);
+    if (text) await this.api.sendTextReply(turn.chatId, turn.replyToMessageId, text);
+  }
+
+  private async reportAgentEndSendError(
+    turn: PendingTelegramTurn,
+    error: unknown,
+  ): Promise<void> {
+    const message = `Failed to send response: ${this.errorText(error)}`;
+    log(`agent_end send error: ${this.errorText(error)}`);
+    this.progress.fail(message);
+    await this.preview.clear(turn.chatId).catch(() => undefined);
+    await this.api
+      .sendTextReply(turn.chatId, turn.replyToMessageId, message)
+      .catch(() => undefined);
+  }
+
+  private errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   async restorePendingTurn(): Promise<boolean> {
