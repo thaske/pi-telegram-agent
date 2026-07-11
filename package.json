@@ -6,7 +6,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.75.4"
+    "@earendil-works/pi-coding-agent": "0.80.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
