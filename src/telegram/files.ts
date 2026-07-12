@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { TELEGRAM_PREFIX } from "../constants";
@@ -17,27 +18,19 @@ export async function sendQueuedAttachment(
   turn: PendingTelegramTurn,
   attachment: QueuedAttachment,
 ): Promise<void> {
-  try {
-    const mediaType = guessMediaType(attachment.path);
-    await api.callMultipart<TelegramSentMessage>(
-      mediaType ? "sendPhoto" : "sendDocument",
-      {
-        chat_id: String(turn.chatId),
-        reply_parameters: JSON.stringify({
-          message_id: turn.replyToMessageId,
-        }),
-      },
-      mediaType ? "photo" : "document",
-      attachment.path,
-      attachment.fileName,
-    );
-  } catch (error) {
-    await api.sendTextReply(
-      turn.chatId,
-      turn.replyToMessageId,
-      `Failed to send attachment ${attachment.fileName}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  const mediaType = guessMediaType(attachment.path);
+  await api.callMultipart<TelegramSentMessage>(
+    mediaType ? "sendPhoto" : "sendDocument",
+    {
+      chat_id: String(turn.chatId),
+      reply_parameters: JSON.stringify({
+        message_id: turn.replyToMessageId,
+      }),
+    },
+    mediaType ? "photo" : "document",
+    attachment.path,
+    attachment.fileName,
+  );
 }
 
 export function collectTelegramFileInfos(
@@ -166,6 +159,7 @@ export async function createTelegramTurn(
       ? `\nAttachments:${files.map((f) => `\n- ${f.path}`).join("")}`
       : "");
   return {
+    id: randomUUID(),
     chatId: firstMessage.chat.id,
     replyToMessageId: firstMessage.message_id,
     queuedAttachments: [],

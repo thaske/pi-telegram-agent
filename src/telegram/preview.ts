@@ -14,6 +14,11 @@ export class TelegramPreviewManager {
   private richDraftSupport: "unknown" | "supported" | "unsupported" = "unknown";
   private nextDraftId = 0;
   private typingInterval: ReturnType<typeof setInterval> | undefined;
+  private operationQueue: Promise<void> = Promise.resolve();
+  private readonly finalizations = new WeakMap<
+    TelegramPreviewState,
+    Promise<boolean>
+  >();
 
   constructor(private readonly api: TelegramApi) {}
 
@@ -38,6 +43,7 @@ export class TelegramPreviewManager {
   }
 
   reset(replyToMessageId?: number): void {
+    if (this.state?.flushTimer) clearTimeout(this.state.flushTimer);
     this.state = {
       mode: this.draftSupport === "unsupported" ? "message" : "draft",
       replyToMessageId,
@@ -76,38 +82,46 @@ export class TelegramPreviewManager {
     const state = this.state;
     if (!state) return;
     if (state.flushTimer) clearTimeout(state.flushTimer);
-    this.state = undefined;
-    if (state.mode === "draft" && state.draftId !== undefined) {
-      try {
-        if (this.richDraftSupport === "supported")
-          await this.api.sendRichMessageDraft(chatId, state.draftId, "");
-        else
-          await this.api.call("sendMessageDraft", {
-            chat_id: chatId,
-            draft_id: state.draftId,
-            text: "",
-          });
-      } catch {
-        /* ignore */
-      }
-    }
+    if (this.state === state) this.state = undefined;
+    await this.enqueue(() => this.clearDraftState(chatId, state));
   }
 
   scheduleFlush(chatId: number): void {
-    if (!this.state || this.state.flushTimer) return;
-    this.state.flushTimer = setTimeout(
-      () => void this.flush(chatId),
-      PREVIEW_THROTTLE_MS,
-    );
+    const state = this.state;
+    if (!state || state.flushTimer) return;
+    state.flushTimer = setTimeout(() => {
+      state.flushTimer = undefined;
+      void this.enqueue(async () => {
+        if (this.state !== state) return;
+        await this.flushState(chatId, state);
+      });
+    }, PREVIEW_THROTTLE_MS);
   }
 
   async finalize(chatId: number): Promise<boolean> {
     const state = this.state;
     if (!state) return false;
-    await this.flush(chatId);
+    const existing = this.finalizations.get(state);
+    if (existing) return existing;
+    if (state.flushTimer) clearTimeout(state.flushTimer);
+    state.flushTimer = undefined;
+    const finalization = this.enqueue(() => this.finalizeState(chatId, state));
+    this.finalizations.set(state, finalization);
+    void finalization.catch(() => {
+      if (this.finalizations.get(state) === finalization)
+        this.finalizations.delete(state);
+    });
+    return finalization;
+  }
+
+  private async finalizeState(
+    chatId: number,
+    state: TelegramPreviewState,
+  ): Promise<boolean> {
+    await this.flushState(chatId, state);
     const finalText = (state.pendingText.trim() || state.lastSentText).trim();
     if (!finalText) {
-      await this.clear(chatId);
+      if (this.state === state) this.state = undefined;
       return false;
     }
     if (state.mode === "draft") {
@@ -117,10 +131,11 @@ export class TelegramPreviewManager {
         undefined,
         state.replyToMessageId,
       );
-      await this.clear(chatId);
+      if (this.state === state) this.state = undefined;
+      await this.clearDraftState(chatId, state);
       return true;
     }
-    this.state = undefined;
+    if (this.state === state) this.state = undefined;
     return state.messageId !== undefined;
   }
 
@@ -138,10 +153,10 @@ export class TelegramPreviewManager {
     return this.nextDraftId;
   }
 
-  private async flush(chatId: number): Promise<void> {
-    const state = this.state;
-    if (!state) return;
-    state.flushTimer = undefined;
+  private async flushState(
+    chatId: number,
+    state: TelegramPreviewState,
+  ): Promise<void> {
     const text = state.pendingText.trim();
     if (!text || text === state.lastSentText) return;
     const richTruncated =
@@ -198,5 +213,33 @@ export class TelegramPreviewManager {
     await this.api.editMessageText(chatId, state.messageId, richTruncated);
     state.mode = "message";
     state.lastSentText = richTruncated;
+  }
+
+  private async clearDraftState(
+    chatId: number,
+    state: TelegramPreviewState,
+  ): Promise<void> {
+    if (state.mode !== "draft" || state.draftId === undefined) return;
+    try {
+      if (this.richDraftSupport === "supported")
+        await this.api.sendRichMessageDraft(chatId, state.draftId, "");
+      else
+        await this.api.call("sendMessageDraft", {
+          chat_id: chatId,
+          draft_id: state.draftId,
+          text: "",
+        });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationQueue.then(operation, operation);
+    this.operationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }

@@ -9,6 +9,7 @@ import type { PendingTelegramTurn } from "../telegram/types";
 
 export function createTelegramAttachTool(
   getActiveTurn: () => PendingTelegramTurn | undefined,
+  saveActiveTurn: (turn: PendingTelegramTurn) => Promise<void>,
 ) {
   return defineTool({
     name: "telegram_attach",
@@ -31,22 +32,28 @@ export function createTelegramAttachTool(
         throw new Error(
           "telegram_attach can only be used while replying to an active Telegram turn",
         );
-      const added: string[] = [];
+      if (
+        activeTelegramTurn.queuedAttachments.length + params.paths.length >
+        MAX_ATTACHMENTS_PER_TURN
+      )
+        throw new Error(
+          `Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`,
+        );
       for (const inputPath of params.paths) {
         const stats = await stat(inputPath);
         if (!stats.isFile()) throw new Error(`Not a file: ${inputPath}`);
-        if (
-          activeTelegramTurn.queuedAttachments.length >=
-          MAX_ATTACHMENTS_PER_TURN
-        )
-          throw new Error(
-            `Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`,
-          );
-        activeTelegramTurn.queuedAttachments.push({
-          path: inputPath,
-          fileName: basename(inputPath),
-        });
-        added.push(inputPath);
+      }
+
+      const added = [...params.paths];
+      const previousLength = activeTelegramTurn.queuedAttachments.length;
+      activeTelegramTurn.queuedAttachments.push(
+        ...added.map((path) => ({ path, fileName: basename(path) })),
+      );
+      try {
+        await saveActiveTurn(activeTelegramTurn);
+      } catch (error) {
+        activeTelegramTurn.queuedAttachments.splice(previousLength);
+        throw error;
       }
       return {
         content: [

@@ -36,10 +36,11 @@ async function sendCompletedText(
     preview.pendingText = text ?? preview.pendingText ?? "";
   }
   if (text && text.length <= MAX_RICH_MESSAGE_LENGTH) {
-    await preview.finalize(turn.chatId);
-    return;
+    const finalized = await preview.finalize(turn.chatId);
+    if (finalized) return;
+  } else {
+    await preview.clear(turn.chatId);
   }
 
-  await preview.clear(turn.chatId);
   if (text) await api.sendTextReply(turn.chatId, turn.replyToMessageId, text);
 }

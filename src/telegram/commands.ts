@@ -15,10 +15,10 @@ type TelegramCommand =
 
 interface TelegramCommandActions {
   bindSession: () => Promise<void>;
-  clearActiveTurn: () => void;
   clearQueuedTurns: () => void;
   discardPreview: () => void;
   getQueueLength: () => number;
+  hasPendingTurn: () => boolean;
   getSession: () => AgentSession;
   newSession: () => Promise<{ cancelled: boolean }>;
   preserveQueuedTurnsAsHistory: () => void;
@@ -143,7 +143,6 @@ export class TelegramCommandHandler {
 
     await this.reply(message, "Starting a new Pi chat...");
     this.actions.clearQueuedTurns();
-    this.actions.clearActiveTurn();
     this.actions.discardPreview();
     const result = await this.actions.newSession();
     if (!result.cancelled) await this.reply(message, "New Pi chat started.");
@@ -206,9 +205,21 @@ export class TelegramCommandHandler {
     message: TelegramMessage,
     action: string,
   ): Promise<boolean> {
-    if (!this.actions.getSession().isStreaming) return true;
-    await this.reply(message, `Cannot ${action} while pi is busy. Send /stop first.`);
-    return false;
+    if (this.actions.getSession().isStreaming) {
+      await this.reply(
+        message,
+        `Cannot ${action} while pi is busy. Send /stop first.`,
+      );
+      return false;
+    }
+    if (this.actions.hasPendingTurn()) {
+      await this.reply(
+        message,
+        `Cannot ${action} while the previous response is still being delivered. Try again shortly.`,
+      );
+      return false;
+    }
+    return true;
   }
 
   private async reply(message: TelegramMessage, text: string): Promise<void> {

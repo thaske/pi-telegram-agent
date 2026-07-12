@@ -142,6 +142,7 @@ export interface PendingTelegramResponse {
   queuedAttachments: QueuedAttachment[];
 }
 export interface PendingTelegramTurn {
+  id: string;
   chatId: number;
   replyToMessageId: number;
   queuedAttachments: QueuedAttachment[];
