@@ -37,9 +37,10 @@ export class TelegramPreviewManager {
     );
   }
 
-  reset(): void {
+  reset(replyToMessageId?: number): void {
     this.state = {
       mode: this.draftSupport === "unsupported" ? "message" : "draft",
+      replyToMessageId,
       pendingText: "",
       lastSentText: "",
     };
@@ -110,7 +111,12 @@ export class TelegramPreviewManager {
       return false;
     }
     if (state.mode === "draft") {
-      await this.api.sendMessage(chatId, finalText);
+      await this.api.sendMessage(
+        chatId,
+        finalText,
+        undefined,
+        state.replyToMessageId,
+      );
       await this.clear(chatId);
       return true;
     }
@@ -178,7 +184,12 @@ export class TelegramPreviewManager {
       }
     }
     if (state.messageId === undefined) {
-      const sent = await this.api.sendMessage(chatId, richTruncated);
+      const sent = await this.api.sendMessage(
+        chatId,
+        richTruncated,
+        undefined,
+        state.replyToMessageId,
+      );
       state.messageId = sent.message_id;
       state.mode = "message";
       state.lastSentText = richTruncated;

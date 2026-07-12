@@ -1,13 +1,11 @@
-import { readFile, unlink, writeFile } from "node:fs/promises";
-
 import type {
   AgentSession,
   AgentSessionEvent,
   createAgentSessionRuntime,
 } from "@earendil-works/pi-coding-agent";
 
-import { MAX_RICH_MESSAGE_LENGTH, PENDING_TURN_PATH } from "./constants";
 import { log } from "./logger";
+import { readPendingTurn, removePendingTurn, writePendingTurn } from "./pending-turn";
 import {
   extractAssistantText,
   getMessageText,
@@ -17,10 +15,11 @@ import { createTelegramAttachTool } from "./pi/telegram-attach-tool";
 import { createTelegramUiContext } from "./pi/ui-context";
 import { TelegramApi } from "./telegram/api";
 import { TelegramCommandHandler } from "./telegram/commands";
-import { createTelegramTurn, sendQueuedAttachments } from "./telegram/files";
+import { createTelegramTurn } from "./telegram/files";
 import { TelegramMediaGroupBuffer } from "./telegram/media-groups";
 import { TelegramModelPicker } from "./telegram/model-picker";
 import { TelegramPreviewManager } from "./telegram/preview";
+import { deliverPendingTelegramResponse } from "./telegram/response-delivery";
 import { TelegramProgressManager } from "./telegram/progress";
 import type {
   PendingTelegramTurn,
@@ -44,6 +43,8 @@ export class TelegramBridge {
   private unsubscribe: (() => void) | undefined;
   private queuedTelegramTurns: PendingTelegramTurn[] = [];
   private activeTelegramTurn: PendingTelegramTurn | undefined;
+  private deliveryRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly failedUpdateAttempts = new Map<number, number>();
   private preserveQueuedTurnsAsHistory = false;
   private readonly commandHandler: TelegramCommandHandler;
   private readonly mediaGroups: TelegramMediaGroupBuffer;
@@ -70,6 +71,8 @@ export class TelegramBridge {
         bindSession: () => this.bindSession(),
         clearActiveTurn: () => {
           this.activeTelegramTurn = undefined;
+          this.cancelDeliveryRetry();
+          void this.clearPendingTurn();
         },
         clearQueuedTurns: () => {
           this.queuedTelegramTurns = [];
@@ -158,9 +161,23 @@ export class TelegramBridge {
           { signal },
         );
         for (const update of updates) {
+          try {
+            await this.handleUpdate(update);
+            this.failedUpdateAttempts.delete(update.update_id);
+          } catch (error) {
+            const attempts =
+              (this.failedUpdateAttempts.get(update.update_id) ?? 0) + 1;
+            if (attempts < 3) {
+              this.failedUpdateAttempts.set(update.update_id, attempts);
+              throw error;
+            }
+            this.failedUpdateAttempts.delete(update.update_id);
+            log(
+              `skipping update ${update.update_id} after ${attempts} failed attempts: ${this.errorText(error)}`,
+            );
+          }
           this.config.lastUpdateId = update.update_id;
           await this.saveConfig(this.config);
-          await this.handleUpdate(update);
         }
       } catch (error) {
         if (
@@ -177,6 +194,7 @@ export class TelegramBridge {
   }
 
   async shutdown(): Promise<void> {
+    this.cancelDeliveryRetry();
     this.preview.stopTypingLoop();
     this.progress.discard();
     this.unsubscribe?.();
@@ -201,24 +219,12 @@ export class TelegramBridge {
     if (!turn) return;
     this.activeTelegramTurn = turn;
     await this.savePendingTurn();
-    this.preview.reset();
+    this.preview.reset(turn.replyToMessageId);
     this.progress.start(turn.chatId, turn.replyToMessageId);
     this.preview.startTypingLoop(turn.chatId);
-    void session.sendUserMessage(turn.content).catch(async (error) => {
-      this.preview.stopTypingLoop();
-      this.progress.fail(
-        error instanceof Error ? error.message : String(error),
-      );
-      this.activeTelegramTurn = undefined;
-      await this.clearPendingTurn();
-      await this.preview.clear(turn.chatId);
-      await this.api.sendTextReply(
-        turn.chatId,
-        turn.replyToMessageId,
-        error instanceof Error ? error.message : String(error),
-      );
-      void this.startNextTurnIfIdle();
-    });
+    void session.sendUserMessage(turn.content).catch((error) =>
+      this.handleTurnStartError(turn, error),
+    );
   }
 
   private async dispatchAuthorizedTelegramMessages(
@@ -326,7 +332,7 @@ export class TelegramBridge {
       if (!isAssistantMessage(event.message)) return;
       this.progress.markAssistantStreaming();
       if (this.preview.hasVisibleText()) void this.preview.finalize(turn.chatId);
-      this.preview.reset();
+      this.preview.reset(turn.replyToMessageId);
       return;
     }
 
@@ -406,83 +412,89 @@ export class TelegramBridge {
   }
 
   private async handleAgentEnd(event: AgentEndEvent): Promise<void> {
-    const doneTurn = this.activeTelegramTurn;
+    const turn = this.activeTelegramTurn;
     this.preview.stopTypingLoop();
-    this.activeTelegramTurn = undefined;
-    await this.clearPendingTurn();
-    if (!doneTurn) {
-      void this.startNextTurnIfIdle();
-      return;
-    }
+    if (!turn) return void this.startNextTurnIfIdle();
 
-    try {
-      await this.sendCompletedTurn(event, doneTurn);
-    } catch (error) {
-      await this.reportAgentEndSendError(doneTurn, error);
-    }
-    void this.startNextTurnIfIdle();
-  }
-
-  private async sendCompletedTurn(
-    event: AgentEndEvent,
-    doneTurn: PendingTelegramTurn,
-  ): Promise<void> {
     const assistant = extractAssistantText(event.messages);
     if (assistant.stopReason === "aborted") {
       this.progress.complete();
-      await this.preview.clear(doneTurn.chatId);
+      await this.preview.clear(turn.chatId);
+      await this.completeActiveTurn(turn);
       return;
     }
 
-    if (assistant.stopReason === "error") {
-      await this.sendAssistantError(
-        doneTurn,
-        assistant.errorMessage || "Pi failed while processing the request.",
-      );
-      return;
-    }
-
-    this.progress.complete();
-    await this.sendAssistantText(doneTurn, assistant.text);
-    await sendQueuedAttachments(this.api, doneTurn);
+    const text =
+      assistant.stopReason === "error"
+        ? (assistant.errorMessage || "Pi failed while processing the request.")
+        : assistant.text;
+    if (assistant.stopReason === "error")
+      this.progress.fail(text || "Pi failed while processing the request.");
+    else this.progress.complete();
+    turn.completedResponse = {
+      text,
+      textDelivered: false,
+      queuedAttachments:
+        assistant.stopReason === "error" ? [] : [...turn.queuedAttachments],
+    };
+    await this.savePendingTurn();
+    await this.deliverCompletedTurn(turn);
   }
 
-  private async sendAssistantError(
-    turn: PendingTelegramTurn,
-    message: string,
-  ): Promise<void> {
-    this.progress.fail(message);
-    await this.preview.clear(turn.chatId);
-    await this.api.sendTextReply(turn.chatId, turn.replyToMessageId, message);
-  }
-
-  private async sendAssistantText(
-    turn: PendingTelegramTurn,
-    text: string | undefined,
-  ): Promise<void> {
-    if (this.preview.hasPreview) {
-      this.preview.pendingText = text ?? this.preview.pendingText ?? "";
-    }
-    if (text && text.length <= MAX_RICH_MESSAGE_LENGTH) {
-      await this.preview.finalize(turn.chatId);
-      return;
-    }
-
-    await this.preview.clear(turn.chatId);
-    if (text) await this.api.sendTextReply(turn.chatId, turn.replyToMessageId, text);
-  }
-
-  private async reportAgentEndSendError(
+  private async handleTurnStartError(
     turn: PendingTelegramTurn,
     error: unknown,
   ): Promise<void> {
-    const message = `Failed to send response: ${this.errorText(error)}`;
-    log(`agent_end send error: ${this.errorText(error)}`);
-    this.progress.fail(message);
-    await this.preview.clear(turn.chatId).catch(() => undefined);
-    await this.api
-      .sendTextReply(turn.chatId, turn.replyToMessageId, message)
-      .catch(() => undefined);
+    if (this.activeTelegramTurn !== turn) return;
+    const text = this.errorText(error);
+    this.preview.stopTypingLoop();
+    this.progress.fail(text);
+    await this.preview.clear(turn.chatId);
+    turn.completedResponse = {
+      text,
+      textDelivered: false,
+      queuedAttachments: [],
+    };
+    await this.savePendingTurn();
+    await this.deliverCompletedTurn(turn);
+  }
+
+  private async deliverCompletedTurn(turn: PendingTelegramTurn): Promise<void> {
+    const response = turn.completedResponse;
+    if (!response || this.activeTelegramTurn !== turn) return;
+    try {
+      await deliverPendingTelegramResponse(
+        this.api,
+        this.preview,
+        turn,
+        () => this.savePendingTurn(),
+      );
+      await this.completeActiveTurn(turn);
+    } catch (error) {
+      log(`response delivery failed: ${this.errorText(error)}`);
+      this.scheduleDeliveryRetry(turn);
+    }
+  }
+
+  private scheduleDeliveryRetry(turn: PendingTelegramTurn): void {
+    if (this.deliveryRetryTimer) return;
+    this.deliveryRetryTimer = setTimeout(() => {
+      this.deliveryRetryTimer = undefined;
+      void this.deliverCompletedTurn(turn);
+    }, 5000);
+  }
+
+  private cancelDeliveryRetry(): void {
+    if (this.deliveryRetryTimer) clearTimeout(this.deliveryRetryTimer);
+    this.deliveryRetryTimer = undefined;
+  }
+
+  private async completeActiveTurn(turn: PendingTelegramTurn): Promise<void> {
+    if (this.activeTelegramTurn !== turn) return;
+    this.cancelDeliveryRetry();
+    this.activeTelegramTurn = undefined;
+    await this.clearPendingTurn();
+    void this.startNextTurnIfIdle();
   }
 
   private errorText(error: unknown): string {
@@ -490,40 +502,30 @@ export class TelegramBridge {
   }
 
   async restorePendingTurn(): Promise<boolean> {
-    try {
-      const data = await readFile(PENDING_TURN_PATH, "utf-8");
-      const turn = JSON.parse(data) as PendingTelegramTurn;
-      await this.clearPendingTurn();
-      this.queuedTelegramTurns.unshift(turn);
-      log("restored pending turn from previous session");
-      await this.startNextTurnIfIdle();
+    const turn = await readPendingTurn();
+    if (!turn) return false;
+    if (turn.completedResponse) {
+      this.activeTelegramTurn = turn;
+      log("restored pending response delivery from previous session");
+      await this.deliverCompletedTurn(turn);
       return true;
-    } catch {
-      return false;
     }
+    await this.clearPendingTurn();
+    this.queuedTelegramTurns.unshift(turn);
+    log("restored pending turn from previous session");
+    await this.startNextTurnIfIdle();
+    return true;
   }
 
   private async savePendingTurn(): Promise<void> {
     if (!this.activeTelegramTurn) return;
-    try {
-      await writeFile(
-        PENDING_TURN_PATH,
-        JSON.stringify(this.activeTelegramTurn),
-        "utf-8",
-      );
-    } catch (e) {
-      log(
-        `failed to persist pending turn: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    await writePendingTurn(this.activeTelegramTurn).catch((error) =>
+      log(`failed to persist pending turn: ${this.errorText(error)}`),
+    );
   }
 
   private async clearPendingTurn(): Promise<void> {
-    try {
-      await unlink(PENDING_TURN_PATH);
-    } catch {
-      // ignore missing file
-    }
+    await removePendingTurn();
   }
 
   private requireRuntime(): Runtime {
@@ -535,4 +537,6 @@ export class TelegramBridge {
     if (!this.session) throw new Error("Session is not initialized");
     return this.session;
   }
+
+  // eslint-disable-next-line max-lines -- The bridge owns the Telegram/session lifecycle.
 }

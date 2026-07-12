@@ -136,15 +136,22 @@ export interface QueuedAttachment {
   path: string;
   fileName: string;
 }
+export interface PendingTelegramResponse {
+  text?: string;
+  textDelivered: boolean;
+  queuedAttachments: QueuedAttachment[];
+}
 export interface PendingTelegramTurn {
   chatId: number;
   replyToMessageId: number;
   queuedAttachments: QueuedAttachment[];
   content: Array<TextContent | ImageContent>;
   historyText: string;
+  completedResponse?: PendingTelegramResponse;
 }
 export interface TelegramPreviewState {
   mode: "draft" | "message";
+  replyToMessageId?: number;
   draftId?: number;
   messageId?: number;
   pendingText: string;

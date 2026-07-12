@@ -6,32 +6,37 @@ import { TelegramApi } from "./api";
 import type {
   DownloadedTelegramFile,
   PendingTelegramTurn,
+  QueuedAttachment,
   TelegramFileInfo,
   TelegramMessage,
   TelegramSentMessage,
 } from "./types";
 
-export async function sendQueuedAttachments(
+export async function sendQueuedAttachment(
   api: TelegramApi,
   turn: PendingTelegramTurn,
+  attachment: QueuedAttachment,
 ): Promise<void> {
-  for (const attachment of turn.queuedAttachments) {
-    try {
-      const mediaType = guessMediaType(attachment.path);
-      await api.callMultipart<TelegramSentMessage>(
-        mediaType ? "sendPhoto" : "sendDocument",
-        { chat_id: String(turn.chatId) },
-        mediaType ? "photo" : "document",
-        attachment.path,
-        attachment.fileName,
-      );
-    } catch (error) {
-      await api.sendTextReply(
-        turn.chatId,
-        turn.replyToMessageId,
-        `Failed to send attachment ${attachment.fileName}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  try {
+    const mediaType = guessMediaType(attachment.path);
+    await api.callMultipart<TelegramSentMessage>(
+      mediaType ? "sendPhoto" : "sendDocument",
+      {
+        chat_id: String(turn.chatId),
+        reply_parameters: JSON.stringify({
+          message_id: turn.replyToMessageId,
+        }),
+      },
+      mediaType ? "photo" : "document",
+      attachment.path,
+      attachment.fileName,
+    );
+  } catch (error) {
+    await api.sendTextReply(
+      turn.chatId,
+      turn.replyToMessageId,
+      `Failed to send attachment ${attachment.fileName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -156,11 +161,10 @@ export async function createTelegramTurn(
     });
   }
   const historyText =
-    rawText ||
-    "(no text)" +
-      (files.length
-        ? `\nAttachments:${files.map((f) => `\n- ${f.path}`).join("")}`
-        : "");
+    (rawText || "(no text)") +
+    (files.length
+      ? `\nAttachments:${files.map((f) => `\n- ${f.path}`).join("")}`
+      : "");
   return {
     chatId: firstMessage.chat.id,
     replyToMessageId: firstMessage.message_id,

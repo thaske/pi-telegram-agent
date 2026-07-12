@@ -41,6 +41,7 @@ export class TelegramModelPicker {
       chatId,
       this.text(chatId),
       await this.markup(chatId, page),
+      replyToMessageId,
     );
   }
 

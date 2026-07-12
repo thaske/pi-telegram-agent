@@ -108,7 +108,7 @@ export class TelegramApi {
 
   async sendTextReply(
     chatId: number,
-    _replyToMessageId: number,
+    replyToMessageId: number,
     text: string,
   ): Promise<number | undefined> {
     let lastMessageId: number | undefined;
@@ -117,19 +117,32 @@ export class TelegramApi {
         ? chunkParagraphs(text)
         : chunkParagraphs(text, MAX_RICH_MESSAGE_LENGTH);
 
+    let replyTo: number | undefined = replyToMessageId;
     for (const chunk of chunks) {
       if (this.richMessageSupport !== "unsupported") {
         try {
-          const sent = await this.sendRichMessage(chatId, chunk);
+          const sent = await this.sendRichMessage(
+            chatId,
+            chunk,
+            undefined,
+            replyTo,
+          );
           lastMessageId = sent.message_id;
+          replyTo = undefined;
           continue;
         } catch (error) {
           this.handleRichMessageFailure(error, "sending rich text reply");
         }
       }
-      for (const legacyChunk of chunkParagraphs(chunk)) {
-        const sent = await this.sendLegacyMessage(chatId, legacyChunk);
+      for (const legacyChunk of this.chunkLegacyText(chunk)) {
+        const sent = await this.sendLegacyMessage(
+          chatId,
+          legacyChunk,
+          undefined,
+          replyTo,
+        );
         lastMessageId = sent.message_id;
+        replyTo = undefined;
       }
     }
     return lastMessageId;
@@ -139,40 +152,46 @@ export class TelegramApi {
     chatId: number,
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
+    replyToMessageId?: number,
   ): Promise<TelegramSentMessage> {
     if (
       this.richMessageSupport !== "unsupported" &&
       text.length <= MAX_RICH_MESSAGE_LENGTH
     ) {
       try {
-        return await this.sendRichMessage(chatId, text, replyMarkup);
+        return await this.sendRichMessage(
+          chatId,
+          text,
+          replyMarkup,
+          replyToMessageId,
+        );
       } catch (error) {
         this.handleRichMessageFailure(error, "sending legacy message");
       }
     }
-    if (text.length > MAX_MESSAGE_LENGTH) {
-      let sent: TelegramSentMessage | undefined;
-      const legacyChunks = chunkParagraphs(text);
-      for (let i = 0; i < legacyChunks.length; i++)
-        sent = await this.sendLegacyMessage(
-          chatId,
-          legacyChunks[i] ?? "",
-          i === legacyChunks.length - 1 ? replyMarkup : undefined,
-        );
-      return sent!;
-    }
-    return await this.sendLegacyMessage(chatId, text, replyMarkup);
+    const legacyChunks = this.chunkLegacyText(text);
+    let sent: TelegramSentMessage | undefined;
+    for (let i = 0; i < legacyChunks.length; i++)
+      sent = await this.sendLegacyMessage(
+        chatId,
+        legacyChunks[i] ?? "",
+        i === legacyChunks.length - 1 ? replyMarkup : undefined,
+        i === 0 ? replyToMessageId : undefined,
+      );
+    return sent!;
   }
 
   async sendRichMessage(
     chatId: number,
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
+    replyToMessageId?: number,
   ): Promise<TelegramSentMessage> {
     const sent = await this.call<TelegramSentMessage>("sendRichMessage", {
       chat_id: chatId,
       rich_message: this.toInputRichMessage(text),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      ...this.replyParameters(replyToMessageId),
     });
     this.richMessageSupport = "supported";
     return sent;
@@ -214,29 +233,26 @@ export class TelegramApi {
         this.handleRichMessageFailure(error, "editing legacy message");
       }
     }
-    if (text.length > MAX_MESSAGE_LENGTH) {
-      const legacyChunks = chunkParagraphs(text);
-      await this.editLegacyMessageText(
+    const legacyChunks = this.chunkLegacyText(text);
+    await this.editLegacyMessageText(
+      chatId,
+      messageId,
+      legacyChunks[0] ?? "",
+      legacyChunks.length === 1 ? replyMarkup : undefined,
+    );
+    for (let i = 1; i < legacyChunks.length; i++)
+      await this.sendLegacyMessage(
         chatId,
-        messageId,
-        legacyChunks[0] ?? "",
-        legacyChunks.length === 1 ? replyMarkup : undefined,
+        legacyChunks[i] ?? "",
+        i === legacyChunks.length - 1 ? replyMarkup : undefined,
       );
-      for (let i = 1; i < legacyChunks.length; i++)
-        await this.sendLegacyMessage(
-          chatId,
-          legacyChunks[i] ?? "",
-          i === legacyChunks.length - 1 ? replyMarkup : undefined,
-        );
-      return;
-    }
-    await this.editLegacyMessageText(chatId, messageId, text, replyMarkup);
   }
 
   private async sendLegacyMessage(
     chatId: number,
     text: string,
     replyMarkup?: TelegramInlineKeyboardMarkup,
+    replyToMessageId?: number,
   ): Promise<TelegramSentMessage> {
     const formatted = formatTelegramText(text);
     try {
@@ -245,6 +261,7 @@ export class TelegramApi {
         text: formatted.text,
         ...(formatted.parseMode ? { parse_mode: formatted.parseMode } : {}),
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+        ...this.replyParameters(replyToMessageId),
       });
     } catch (error) {
       const isParseError = this.isLegacyHtmlParseError(error, formatted);
@@ -255,12 +272,51 @@ export class TelegramApi {
         );
         return await this.call<TelegramSentMessage>("sendMessage", {
           chat_id: chatId,
-          text: text.slice(0, MAX_MESSAGE_LENGTH),
+          text,
           ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          ...this.replyParameters(replyToMessageId),
         });
       }
       throw error;
     }
+  }
+
+  private chunkLegacyText(text: string): string[] {
+    const chunks: string[] = [];
+    for (const rawChunk of chunkParagraphs(text)) {
+      let remaining = rawChunk;
+      while (remaining) {
+        if (formatTelegramText(remaining).text.length <= MAX_MESSAGE_LENGTH) {
+          chunks.push(remaining);
+          break;
+        }
+        let low = 1;
+        let high = Math.min(remaining.length, MAX_MESSAGE_LENGTH);
+        let splitAt = 0;
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2);
+          if (
+            formatTelegramText(remaining.slice(0, middle)).text.length <=
+            MAX_MESSAGE_LENGTH
+          ) {
+            splitAt = middle;
+            low = middle + 1;
+          } else {
+            high = middle - 1;
+          }
+        }
+        if (splitAt === 0) splitAt = 1;
+        chunks.push(remaining.slice(0, splitAt));
+        remaining = remaining.slice(splitAt);
+      }
+    }
+    return chunks.length ? chunks : [""];
+  }
+
+  private replyParameters(replyToMessageId?: number): Record<string, unknown> {
+    return replyToMessageId === undefined
+      ? {}
+      : { reply_parameters: { message_id: replyToMessageId } };
   }
 
   private async editLegacyMessageText(
@@ -288,7 +344,7 @@ export class TelegramApi {
         await this.call<unknown>("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: text.slice(0, MAX_MESSAGE_LENGTH),
+          text,
           ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
         });
         return;
