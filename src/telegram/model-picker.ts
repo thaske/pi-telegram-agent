@@ -168,9 +168,8 @@ export class TelegramModelPicker {
   private async getAvailableModels(query?: string) {
     const normalized = query?.trim().toLowerCase();
     const ranks = await getOpenRouterPopularityRanks().catch(() => undefined);
-    return this.getSession()
-      .modelRegistry.getAvailable()
-      .filter((model) => {
+    const models = await this.getSession().modelRuntime.getAvailable();
+    return models.filter((model) => {
         if (!normalized) return true;
         return [
           model.provider,

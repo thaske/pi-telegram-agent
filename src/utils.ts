@@ -42,7 +42,6 @@ export function chunkParagraphs(
       if (current) {
         const withSep = current + separator;
         chunks.push(withSep.length <= maxLength ? withSep : current);
-        current = "";
       }
 
       let remaining = paragraph;
