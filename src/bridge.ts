@@ -367,8 +367,6 @@ export class TelegramBridge {
       this.progress.markThinking(false);
     } else if (assistantEvent.type.startsWith("text_")) {
       this.progress.markAssistantStreaming();
-    } else if (assistantEvent.type.startsWith("toolcall_")) {
-      this.progress.setStatus("tool-call", "Preparing a tool call…");
     }
     this.preview.pendingText = getMessageText(event.message);
     this.preview.scheduleFlush(turn.chatId);
@@ -395,10 +393,7 @@ export class TelegramBridge {
   private handleStatusSessionEvent(event: AgentSessionEvent): void {
     switch (event.type) {
       case "compaction_start":
-        this.progress.setStatus(
-          "compaction",
-          `Compacting context (${event.reason})…`,
-        );
+        this.progress.setStatus("compaction", "Preparing more context…");
         return;
       case "compaction_end":
         this.progress.setStatus("compaction", this.compactionStatus(event));
@@ -406,26 +401,24 @@ export class TelegramBridge {
       case "auto_retry_start":
         this.progress.setStatus(
           "retry",
-          `Retrying after error (${event.attempt}/${event.maxAttempts})…`,
+          `Retrying after an error · ${event.attempt}/${event.maxAttempts}`,
         );
         return;
       case "auto_retry_end":
         this.progress.setStatus(
           "retry",
           event.success
-            ? "Retry succeeded"
-            : (event.finalError ?? "Retry failed"),
+            ? undefined
+            : `Retry failed${event.finalError ? ` · ${event.finalError}` : ""}`,
         );
     }
   }
 
   private compactionStatus(
     event: Extract<AgentSessionEvent, { type: "compaction_end" }>,
-  ): string {
-    if (event.aborted) return "Compaction aborted";
-    return event.errorMessage
-      ? `Compaction failed: ${event.errorMessage}`
-      : "Compaction complete";
+  ): string | undefined {
+    if (event.aborted || !event.errorMessage) return undefined;
+    return `Context preparation failed · ${event.errorMessage}`;
   }
 
   private async handleAgentEnd(event: AgentEndEvent): Promise<void> {

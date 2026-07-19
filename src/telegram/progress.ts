@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import {
   TELEGRAM_PROGRESS_INITIAL_DELAY_MS,
   TELEGRAM_PROGRESS_THROTTLE_MS,
@@ -8,14 +10,43 @@ import type { TelegramInlineKeyboardMarkup } from "./types";
 
 type ToolState = "running" | "done" | "error";
 
-interface ProgressTool {
+const FILE_TOOL_VERBS: Record<string, string> = {
+  read: "Reading",
+  edit: "Updating",
+  write: "Writing",
+};
+
+const SIMPLE_TOOL_ACTIVITIES: Record<string, string> = {
+  bash: "Running a command",
+  memory: "Saving context",
+  skill_manage: "Updating a workflow",
+  telegram_attach: "Preparing an attachment",
+  mcp: "Using the browser",
+};
+
+const CONTEXT_TOOLS = new Set(["memory_search", "session_search"]);
+const WEB_TOOL_ACTIVITIES: Record<string, string> = {
+  web_search_exa: "Searching the web",
+  web_answer_exa: "Researching an answer",
+  web_find_similar_exa: "Finding related sources",
+};
+const RESEARCH_TOOL_ACTIVITIES: Record<string, string> = {
+  exa_research_step: "Planning research",
+  exa_research_status: "Reviewing research progress",
+  exa_research_summary: "Summarizing the research plan",
+  exa_research_reset: "Resetting the research plan",
+};
+
+interface ToolPresentation {
+  activity: string;
+  detail?: string;
+}
+
+interface ProgressTool extends ToolPresentation {
   id: string;
-  name: string;
-  label: string;
   state: ToolState;
   startedAt: number;
   endedAt?: number;
-  note?: string;
 }
 
 interface ProgressState {
@@ -27,7 +58,6 @@ interface ProgressState {
   completed: boolean;
   failed?: string;
   thinkingActive: boolean;
-  thinkingSeen: boolean;
   assistantStreaming: boolean;
   workingMessage?: string;
   hiddenThinkingLabel?: string;
@@ -54,7 +84,6 @@ export class TelegramProgressManager {
       visible: false,
       completed: false,
       thinkingActive: false,
-      thinkingSeen: false,
       assistantStreaming: false,
       statuses: new Map(),
       tools: [],
@@ -104,7 +133,6 @@ export class TelegramProgressManager {
     const state = this.state;
     if (!state) return;
     state.thinkingActive = active;
-    state.thinkingSeen = state.thinkingSeen || active;
     this.scheduleFlush(active);
   }
 
@@ -119,17 +147,13 @@ export class TelegramProgressManager {
     const state = this.state;
     if (!state) return;
     const existing = state.tools.find((tool) => tool.id === toolCallId);
-    const label = this.formatToolLabel(toolName, args);
+    const presentation = this.formatToolPresentation(toolName, args);
     if (existing) {
-      existing.name = toolName;
-      existing.label = label;
-      existing.state = "running";
-      existing.note = undefined;
+      Object.assign(existing, presentation, { state: "running" as const });
     } else {
       state.tools.push({
         id: toolCallId,
-        name: toolName,
-        label,
+        ...presentation,
         state: "running",
         startedAt: Date.now(),
       });
@@ -141,15 +165,13 @@ export class TelegramProgressManager {
     const state = this.state;
     if (!state) return;
     const tool = state.tools.find((candidate) => candidate.id === toolCallId);
+    const presentation = this.formatToolPresentation(toolName, args);
     if (tool) {
-      tool.name = toolName;
-      tool.label = this.formatToolLabel(toolName, args);
-      tool.state = "running";
+      Object.assign(tool, presentation, { state: "running" as const });
     } else {
       state.tools.push({
         id: toolCallId,
-        name: toolName,
-        label: this.formatToolLabel(toolName, args),
+        ...presentation,
         state: "running",
         startedAt: Date.now(),
       });
@@ -160,26 +182,22 @@ export class TelegramProgressManager {
   toolEnd(
     toolCallId: string,
     toolName: string,
-    result: unknown,
+    _result: unknown,
     isError: boolean,
   ): void {
     const state = this.state;
     if (!state) return;
     const tool = state.tools.find((candidate) => candidate.id === toolCallId);
-    const note = isError ? this.summarizeToolError(result) : undefined;
     if (tool) {
       tool.state = isError ? "error" : "done";
       tool.endedAt = Date.now();
-      tool.note = note;
     } else {
       state.tools.push({
         id: toolCallId,
-        name: toolName,
-        label: toolName,
+        ...this.formatToolPresentation(toolName, undefined),
         state: isError ? "error" : "done",
         startedAt: Date.now(),
         endedAt: Date.now(),
-        note,
       });
     }
     this.scheduleFlush(true);
@@ -283,125 +301,44 @@ export class TelegramProgressManager {
 
   private render(state: ProgressState): string {
     const elapsed = this.formatElapsed(Date.now() - state.startedAt);
-    const lines: string[] = [`${this.statusLabel(state)}  ·  ${elapsed}`];
+    const paragraphs = [`${this.statusLabel(state)} · ${elapsed}`];
 
-    if (!state.completed) lines.push("Stop anytime: /stop");
-    this.addCurrentSection(lines, state);
-    this.addToolOrThinkingSection(lines, state);
-    this.addStatusSection(lines, state);
-    this.addFailureSection(lines, state);
-    return lines.join("\n");
+    if (!state.completed && !state.failed) {
+      const activity = state.workingMessage ?? this.currentActivity(state);
+      if (activity)
+        paragraphs.push(this.truncate(this.singleLine(activity), 84));
+    }
+    if (state.failed)
+      paragraphs.push(this.truncate(this.singleLine(state.failed), 240));
+
+    return paragraphs.join("\n\n");
   }
 
   private statusLabel(state: ProgressState): string {
     if (state.failed) return "❌ Error";
     if (state.completed) return "✅ Done";
     if (state.tools.some((tool) => tool.state === "running")) {
-      return "🛠 Using tools";
+      return "🛠 Working";
     }
     if (state.thinkingActive) return "💭 Thinking";
     if (state.assistantStreaming) return "✍️ Writing";
-    return "🔄 Working";
-  }
-
-  private addCurrentSection(lines: string[], state: ProgressState): void {
-    const current = state.workingMessage ?? this.currentActivity(state);
-    if (!current) return;
-    lines.push("", "▸ Current", this.indent(this.truncate(current, 180)));
-  }
-
-  private addToolOrThinkingSection(
-    lines: string[],
-    state: ProgressState,
-  ): void {
-    if (state.tools.length) {
-      this.addToolSection(lines, state);
-      return;
-    }
-    if (!state.thinkingSeen) return;
-    lines.push("", "▸ Thinking", this.indent(this.thinkingLabel(state)));
-  }
-
-  private addToolSection(lines: string[], state: ProgressState): void {
-    const completed = state.tools.filter((tool) => tool.state === "done").length;
-    const failed = state.tools.filter((tool) => tool.state === "error").length;
-    const failureLabel = failed ? ` · ${failed} failed` : "";
-    lines.push(
-      "",
-      `▸ Tools  ${completed}/${state.tools.length} done${failureLabel}`,
-    );
-
-    const visibleTools = state.tools.slice(-5);
-    this.addHiddenToolCount(lines, state.tools.length - visibleTools.length);
-    for (const tool of visibleTools) lines.push(...this.renderTool(tool));
-  }
-
-  private addHiddenToolCount(lines: string[], hidden: number): void {
-    if (hidden <= 0) return;
-    lines.push(
-      this.indent(`… ${hidden} earlier tool call${hidden === 1 ? "" : "s"}`),
-    );
-  }
-
-  private addStatusSection(lines: string[], state: ProgressState): void {
-    const visibleStatuses = [...state.statuses.entries()].slice(-2);
-    if (!visibleStatuses.length) return;
-
-    lines.push("", "▸ Notes");
-    for (const [key, value] of visibleStatuses) {
-      lines.push(this.indent(this.truncate(`${key}: ${value}`, 140)));
-    }
-  }
-
-  private addFailureSection(lines: string[], state: ProgressState): void {
-    if (!state.failed) return;
-    lines.push("", "▸ Error", this.indent(this.truncate(state.failed, 500)));
-  }
-
-  private thinkingLabel(state: ProgressState): string {
-    return (
-      state.hiddenThinkingLabel ??
-      "Reasoning privately — raw chain-of-thought is hidden."
-    );
+    return "🔄 Starting";
   }
 
   private currentActivity(state: ProgressState): string | undefined {
     const running = state.tools
       .filter((tool) => tool.state === "running")
       .at(-1);
-    if (running) return `Using ${running.label}`;
-    if (state.thinkingActive)
-      return (
-        state.hiddenThinkingLabel ??
-        "Reasoning privately — raw chain-of-thought is hidden."
-      );
-    if (state.assistantStreaming) return "Writing response text";
+    if (running) return this.toolActivity(running);
+
+    const status = [...state.statuses.values()].at(-1);
+    if (status) return status;
+    if (state.thinkingActive) return state.hiddenThinkingLabel;
     return undefined;
   }
 
-  private renderTool(tool: ProgressTool): string[] {
-    const icon =
-      tool.state === "running" ? "⏳" : tool.state === "done" ? "✅" : "❌";
-    const duration = tool.endedAt
-      ? ` · ${this.formatElapsed(tool.endedAt - tool.startedAt)}`
-      : "";
-    const [name, detail] = this.splitToolLabel(tool.label);
-    const lines = [
-      this.indent(`${icon} ${this.truncate(name, 72)}${duration}`),
-    ];
-    if (detail) lines.push(this.indent(this.truncate(detail, 120), 2));
-    if (tool.note) lines.push(this.indent(this.truncate(tool.note, 120), 2));
-    return lines;
-  }
-
-  private indent(text: string, level = 1): string {
-    return `${"  ".repeat(level)}${text}`;
-  }
-
-  private splitToolLabel(label: string): [string, string | undefined] {
-    const index = label.indexOf(": ");
-    if (index === -1) return [label, undefined];
-    return [label.slice(0, index), label.slice(index + 2)];
+  private toolActivity(tool: ProgressTool): string {
+    return tool.detail ? `${tool.activity} · ${tool.detail}` : tool.activity;
   }
 
   private stopMarkup(): TelegramInlineKeyboardMarkup {
@@ -410,50 +347,85 @@ export class TelegramProgressManager {
     };
   }
 
-  private formatToolLabel(toolName: string, args: unknown): string {
+  private formatToolPresentation(
+    toolName: string,
+    args: unknown,
+  ): ToolPresentation {
     const data = this.asRecord(args);
-    const name = toolName || "tool";
-    const path = this.stringValue(data, "path");
-    const command = this.stringValue(data, "command");
-    const query = this.stringValue(data, "query");
-    const topic = this.stringValue(data, "topic");
-    const url = this.firstString(data?.urls) ?? this.stringValue(data, "url");
+    const normalized = toolName.toLowerCase();
+    const shortName = normalized.split(/[.:/]/).at(-1) || "tool";
+    const file = this.fileDetail(this.stringValue(data, "path"));
 
-    if (command) return `${name}: ${this.singleLine(command)}`;
-    if (path) return `${name}: ${path}`;
-    if (query) return `${name}: ${this.singleLine(query)}`;
-    if (topic) return `${name}: ${this.singleLine(topic)}`;
-    if (url) return `${name}: ${this.singleLine(url)}`;
-
-    const summary = this.summarizeArgs(data);
-    return summary ? `${name}: ${summary}` : name;
-  }
-
-  private summarizeArgs(data: Record<string, unknown> | undefined): string {
-    if (!data) return "";
-    const entries = Object.entries(data)
-      .filter(([, value]) =>
-        ["string", "number", "boolean"].includes(typeof value),
-      )
-      .slice(0, 2)
-      .map(([key, value]) => `${key}=${this.singleLine(String(value))}`);
-    return this.truncate(entries.join(", "), 120);
-  }
-
-  private summarizeToolError(result: unknown): string | undefined {
-    const data = this.asRecord(result);
-    const content = data?.content;
-    if (Array.isArray(content)) {
-      const text = content
-        .map((item) => this.asRecord(item)?.text)
-        .filter((value): value is string => typeof value === "string")
-        .join(" ")
-        .trim();
-      if (text) return this.singleLine(text);
+    if (this.isParallelTool(normalized, shortName)) {
+      const count = Array.isArray(data?.tool_uses) ? data.tool_uses.length : 0;
+      return {
+        activity: count
+          ? `Running ${count} tasks in parallel`
+          : "Running tasks in parallel",
+      };
     }
-    if (typeof data?.error === "string") return this.singleLine(data.error);
-    if (typeof data?.message === "string") return this.singleLine(data.message);
-    return undefined;
+
+    const fileVerb = FILE_TOOL_VERBS[shortName];
+    if (fileVerb)
+      return { activity: file ? `${fileVerb} ${file}` : `${fileVerb} a file` };
+    if (CONTEXT_TOOLS.has(shortName))
+      return { activity: "Reviewing prior context" };
+
+    const webActivity = WEB_TOOL_ACTIVITIES[shortName];
+    if (webActivity)
+      return this.withDetail(webActivity, this.searchDetail(data));
+    if (shortName === "web_fetch_exa")
+      return this.withDetail(
+        "Reading web sources",
+        this.urlHost(this.sourceUrl(data)),
+      );
+    const researchActivity = RESEARCH_TOOL_ACTIVITIES[shortName];
+    if (researchActivity) return { activity: researchActivity };
+
+    const simpleActivity = SIMPLE_TOOL_ACTIVITIES[shortName];
+    return simpleActivity
+      ? { activity: simpleActivity }
+      : { activity: `Using ${this.humanizeToolName(shortName)}` };
+  }
+
+  private isParallelTool(normalized: string, shortName: string): boolean {
+    return normalized === "multi_tool_use.parallel" || shortName === "parallel";
+  }
+
+  private searchDetail(
+    data: Record<string, unknown> | undefined,
+  ): string | undefined {
+    return this.stringValue(data, "query") ?? this.stringValue(data, "topic");
+  }
+
+  private sourceUrl(
+    data: Record<string, unknown> | undefined,
+  ): string | undefined {
+    return this.firstString(data?.urls) ?? this.stringValue(data, "url");
+  }
+
+  private withDetail(activity: string, detail?: string): ToolPresentation {
+    return detail
+      ? { activity, detail: this.truncate(this.singleLine(detail), 48) }
+      : { activity };
+  }
+
+  private fileDetail(path?: string): string | undefined {
+    if (!path) return undefined;
+    return this.truncate(basename(path) || path, 48);
+  }
+
+  private urlHost(url?: string): string | undefined {
+    if (!url) return undefined;
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private humanizeToolName(name: string): string {
+    return name.replace(/[_-]+/g, " ").trim() || "a tool";
   }
 
   private asRecord(value: unknown): Record<string, unknown> | undefined {
