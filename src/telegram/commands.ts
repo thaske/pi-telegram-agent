@@ -197,7 +197,7 @@ export class TelegramCommandHandler {
   private async start(message: TelegramMessage): Promise<void> {
     await this.reply(
       message,
-      "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop.",
+      "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /goal, /stop.",
     );
   }
 

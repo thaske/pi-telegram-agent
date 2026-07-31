@@ -5,6 +5,7 @@ import type {
   createAgentSessionRuntime,
 } from "@earendil-works/pi-coding-agent";
 
+import { TELEGRAM_PREFIX } from "./constants";
 import { log } from "./logger";
 import { readPendingTurn, removePendingTurn, writePendingTurn } from "./pending-turn";
 import {
@@ -32,6 +33,38 @@ import type {
 
 type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 type AgentEndEvent = Extract<AgentSessionEvent, { type: "agent_end" }>;
+
+const GOAL_HELP = `Goal commands:
+/goal <objective> — set or replace a goal
+/goal status — view the current goal
+/goal pause — pause autonomous work
+/goal resume — resume a paused goal
+/goal clear — remove the current goal
+/goal statusbar on|off — show or hide goal status`;
+
+export function goalCommandResponse(command: string, response?: string): string {
+  if (command.trim().toLowerCase() !== "/goal")
+    return response ?? "Command completed.";
+  if (!response || response.startsWith("Usage: /goal")) return GOAL_HELP;
+  return `${response}\n\n${GOAL_HELP}`;
+}
+
+export function piGoalCommandText(
+  messages: TelegramMessage[],
+): string | undefined {
+  const text = messages
+    .map((message) => (message.text || message.caption || "").trim())
+    .find(Boolean);
+  return text && /^\/goal(?:\s|$)/i.test(text) ? text : undefined;
+}
+
+function restoredPiGoalCommand(turn: PendingTelegramTurn): string | undefined {
+  const text = turn.content.find((part) => part.type === "text")?.text;
+  const match = text?.match(
+    new RegExp(`^${TELEGRAM_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+(/goal(?:\\s.*)?)$`, "i"),
+  );
+  return match?.[1];
+}
 
 export class TelegramBridge {
   readonly api: TelegramApi;
@@ -110,6 +143,7 @@ export class TelegramBridge {
       uiContext: createTelegramUiContext(
         this.progress,
         () => this.activeTelegramTurn !== undefined,
+        (message) => this.captureExtensionNotification(message),
       ),
       commandContextActions: {
         waitForIdle: () => session.agent.waitForIdle(),
@@ -239,9 +273,19 @@ export class TelegramBridge {
     this.preview.reset(turn.replyToMessageId);
     this.progress.start(turn.chatId, turn.replyToMessageId);
     this.preview.startTypingLoop(turn.chatId);
-    void session.sendUserMessage(turn.content).catch((error) =>
-      this.handleTurnStartError(turn, error),
-    );
+    const prompt = turn.extensionCommand
+      ? session.prompt(turn.extensionCommand)
+      : session.sendUserMessage(turn.content);
+    void prompt
+      .then(() => {
+        if (
+          turn.extensionCommand &&
+          this.activeTelegramTurn === turn &&
+          !session.isStreaming
+        )
+          return this.completeExtensionCommand(turn);
+      })
+      .catch((error) => this.handleTurnStartError(turn, error));
   }
 
   private async dispatchAuthorizedTelegramMessages(
@@ -253,9 +297,9 @@ export class TelegramBridge {
       ? this.queuedTelegramTurns.splice(0)
       : [];
     this.preserveQueuedTurnsAsHistory = false;
-    this.queuedTelegramTurns.push(
-      await createTelegramTurn(this.api, messages, historyTurns),
-    );
+    const turn = await createTelegramTurn(this.api, messages, historyTurns);
+    turn.extensionCommand = piGoalCommandText(messages);
+    this.queuedTelegramTurns.push(turn);
     await this.startNextTurnIfIdle();
   }
 
@@ -454,6 +498,23 @@ export class TelegramBridge {
     await this.deliverCompletedTurn(turn);
   }
 
+  private async completeExtensionCommand(
+    turn: PendingTelegramTurn,
+  ): Promise<void> {
+    if (this.activeTelegramTurn !== turn) return;
+    this.preview.stopTypingLoop();
+    this.progress.complete();
+    turn.completedResponse = {
+      text: goalCommandResponse(
+        turn.extensionCommand ?? "",
+        turn.extensionResponseText,
+      ),
+      textDelivered: false,
+      queuedAttachments: [],
+    };
+    await this.deliverCompletedTurn(turn);
+  }
+
   private async handleTurnStartError(
     turn: PendingTelegramTurn,
     error: unknown,
@@ -534,6 +595,11 @@ export class TelegramBridge {
     void this.startNextTurnIfIdle();
   }
 
+  private captureExtensionNotification(message: string): void {
+    if (this.activeTelegramTurn?.extensionCommand)
+      this.activeTelegramTurn.extensionResponseText = message;
+  }
+
   private errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
@@ -541,6 +607,7 @@ export class TelegramBridge {
   async restorePendingTurn(): Promise<boolean> {
     const turn = await readPendingTurn();
     if (!turn) return false;
+    turn.extensionCommand ??= restoredPiGoalCommand(turn);
     if (turn.completedResponse) {
       this.activeTelegramTurn = turn;
       log("restored pending response delivery from previous session");

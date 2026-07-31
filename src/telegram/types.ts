@@ -148,6 +148,8 @@ export interface PendingTelegramTurn {
   queuedAttachments: QueuedAttachment[];
   content: Array<TextContent | ImageContent>;
   historyText: string;
+  extensionCommand?: string;
+  extensionResponseText?: string;
   completedResponse?: PendingTelegramResponse;
 }
 export interface TelegramPreviewState {

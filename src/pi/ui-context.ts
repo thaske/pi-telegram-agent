@@ -4,6 +4,7 @@ import type { TelegramProgressManager } from "../telegram/progress";
 export function createTelegramUiContext(
   progress: TelegramProgressManager,
   hasActiveTelegramTurn: () => boolean,
+  onNotify?: (message: string) => void,
 ) {
   return {
     select: async () => undefined,
@@ -11,8 +12,10 @@ export function createTelegramUiContext(
     input: async () => undefined,
     notify: (message: string, type?: string) => {
       log(`notify:${type ?? "info"}: ${message}`);
-      if (hasActiveTelegramTurn())
+      if (hasActiveTelegramTurn()) {
+        onNotify?.(message);
         progress.setStatus(`notify:${type ?? "info"}`, message);
+      }
     },
     onTerminalInput: () => () => undefined,
     setStatus: (key: string, text?: string) => progress.setStatus(key, text),
