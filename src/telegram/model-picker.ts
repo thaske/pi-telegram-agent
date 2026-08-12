@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 import { getOpenRouterPopularityRanks } from "../openrouter-rankings";
@@ -151,11 +153,7 @@ export class TelegramModelPicker {
       return true;
     }
     if (action === "set") {
-      const index = Number(value);
-      const text = await this.selectByIndex(
-        message.chat.id,
-        Number.isFinite(index) ? index : -1,
-      );
+      const text = await this.selectByToken(value ?? "");
       this.queries.delete(message.chat.id);
       await this.api.editMessageText(message.chat.id, message.message_id, text);
       await this.api.answerCallbackQuery(query.id, text);
@@ -217,14 +215,13 @@ export class TelegramModelPicker {
     const current = this.getSession().model;
     const rows = models
       .slice(safePage * pageSize, safePage * pageSize + pageSize)
-      .map((model, i) => {
-        const index = safePage * pageSize + i;
+      .map((model) => {
         const selected =
           current?.provider === model.provider && current?.id === model.id;
         return [
           {
             text: `${selected ? "✓ " : ""}${model.name} (${model.provider})`,
-            callback_data: `model:set:${index}`,
+            callback_data: `model:set:${this.modelToken(model)}`,
           },
         ];
       });
@@ -262,12 +259,25 @@ export class TelegramModelPicker {
       .join("\n");
   }
 
-  private async selectByIndex(chatId: number, index: number): Promise<string> {
-    const model = (await this.getAvailableModels(this.queries.get(chatId)))[
-      index
-    ];
+  /**
+   * Buttons carry a token derived from provider/id rather than a list index:
+   * the list is re-derived per click and its order depends on the search state
+   * and the OpenRouter ranking cache, so an index can point at a different
+   * model than the one the user tapped.
+   */
+  private async selectByToken(token: string): Promise<string> {
+    const model = (await this.getAvailableModels()).find(
+      (candidate) => this.modelToken(candidate) === token,
+    );
     if (!model) return "That model selection is no longer available.";
     await this.getSession().setModel(model);
     return `Model changed to ${model.provider}/${model.id}.`;
+  }
+
+  private modelToken(model: { provider: string; id: string }): string {
+    return createHash("sha256")
+      .update(`${model.provider}/${model.id}`)
+      .digest("hex")
+      .slice(0, 12);
   }
 }

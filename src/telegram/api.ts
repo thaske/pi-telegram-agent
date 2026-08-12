@@ -19,6 +19,9 @@ import type {
   TelegramSentMessage,
 } from "./types";
 
+const MAX_RATE_LIMIT_RETRIES = 3;
+const MAX_RETRY_AFTER_SECONDS = 60;
+
 export class TelegramApi {
   private richMessageSupport: "unknown" | "supported" | "unsupported" =
     "unknown";
@@ -30,21 +33,20 @@ export class TelegramApi {
     body: Record<string, unknown>,
     options?: { signal?: AbortSignal },
   ): Promise<TResponse> {
-    const { botToken } = this.getConfig();
-    if (!botToken) throw new Error("Telegram bot token is not configured");
-    const response = await fetch(
-      `https://api.telegram.org/bot${botToken}/${method}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      },
-    );
-    const data = (await response.json()) as TelegramApiResponse<TResponse>;
-    if (!data.ok || data.result === undefined)
-      throw new Error(data.description || `Telegram API ${method} failed`);
-    return data.result;
+    return this.withRateLimitRetry(method, options?.signal, async () => {
+      const { botToken } = this.getConfig();
+      if (!botToken) throw new Error("Telegram bot token is not configured");
+      const response = await fetch(
+        `https://api.telegram.org/bot${botToken}/${method}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: options?.signal,
+        },
+      );
+      return (await response.json()) as TelegramApiResponse<TResponse>;
+    });
   }
 
   async callMultipart<TResponse>(
@@ -57,17 +59,58 @@ export class TelegramApi {
   ): Promise<TResponse> {
     const { botToken } = this.getConfig();
     if (!botToken) throw new Error("Telegram bot token is not configured");
-    const form = new FormData();
-    for (const [key, value] of Object.entries(fields)) form.set(key, value);
-    form.set(fileField, new Blob([await readFile(filePath)]), fileName);
-    const response = await fetch(
-      `https://api.telegram.org/bot${botToken}/${method}`,
-      { method: "POST", body: form, signal: options?.signal },
-    );
-    const data = (await response.json()) as TelegramApiResponse<TResponse>;
-    if (!data.ok || data.result === undefined)
-      throw new Error(data.description || `Telegram API ${method} failed`);
-    return data.result;
+    const fileContents = await readFile(filePath);
+    return this.withRateLimitRetry(method, options?.signal, async () => {
+      const form = new FormData();
+      for (const [key, value] of Object.entries(fields)) form.set(key, value);
+      form.set(fileField, new Blob([fileContents]), fileName);
+      const response = await fetch(
+        `https://api.telegram.org/bot${botToken}/${method}`,
+        { method: "POST", body: form, signal: options?.signal },
+      );
+      return (await response.json()) as TelegramApiResponse<TResponse>;
+    });
+  }
+
+  /**
+   * Telegram answers bursts of edits with 429 and a `retry_after` hint. Honour
+   * it a bounded number of times so throttled previews and progress panels are
+   * not silently dropped.
+   */
+  private async withRateLimitRetry<TResponse>(
+    method: string,
+    signal: AbortSignal | undefined,
+    send: () => Promise<TelegramApiResponse<TResponse>>,
+  ): Promise<TResponse> {
+    for (let attempt = 0; ; attempt++) {
+      const data = await send();
+      if (data.ok && data.result !== undefined) return data.result;
+      const retryAfter = data.parameters?.retry_after;
+      if (
+        data.error_code !== 429 ||
+        retryAfter === undefined ||
+        attempt >= MAX_RATE_LIMIT_RETRIES ||
+        signal?.aborted
+      )
+        throw new Error(data.description || `Telegram API ${method} failed`);
+      const waitMs = Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000;
+      log(`rate limited on ${method}; retrying in ${waitMs}ms`);
+      await this.wait(waitMs, signal);
+    }
+  }
+
+  private wait(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   async configureCommands(signal?: AbortSignal): Promise<void> {
@@ -397,6 +440,13 @@ export class TelegramApi {
 
   private formatError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    await this.call<boolean>("deleteMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+    });
   }
 
   async answerCallbackQuery(

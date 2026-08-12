@@ -34,6 +34,9 @@ import type {
 type Runtime = Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 type AgentEndEvent = Extract<AgentSessionEvent, { type: "agent_end" }>;
 
+const MAX_DELIVERY_ATTEMPTS = 5;
+const DELIVERY_RETRY_DELAY_MS = 5000;
+
 const GOAL_HELP = `Goal commands:
 /goal <objective> — set or replace a goal
 /goal status — view the current goal
@@ -82,6 +85,7 @@ export class TelegramBridge {
   private activeTelegramTurn: PendingTelegramTurn | undefined;
   private deliveryInFlight: Promise<void> | undefined;
   private deliveryRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private deliveryAttempts = 0;
   private turnStartRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly failedUpdateAttempts = new Map<number, number>();
   private preserveQueuedTurnsAsHistory = false;
@@ -195,7 +199,7 @@ export class TelegramBridge {
                 : undefined,
             limit: 10,
             timeout: 30,
-            allowed_updates: ["message", "edited_message", "callback_query"],
+            allowed_updates: ["message", "callback_query"],
           },
           { signal },
         );
@@ -350,7 +354,9 @@ export class TelegramBridge {
       return;
     }
 
-    const message = update.message || update.edited_message;
+    // Edited messages are deliberately ignored: replaying an edit as a fresh
+    // turn re-prompts Pi for something the user already sent.
+    const message = update.message;
     if (
       !message ||
       message.chat.type !== "private" ||
@@ -468,7 +474,7 @@ export class TelegramBridge {
   private async handleAgentEnd(event: AgentEndEvent): Promise<void> {
     const turn = this.activeTelegramTurn;
     this.preview.stopTypingLoop();
-    if (!turn) return void this.startNextTurnIfIdle();
+    if (!turn) return this.startNextTurnSafely();
 
     const assistant = extractAssistantText(event.messages);
     if (assistant.stopReason === "aborted") {
@@ -553,11 +559,50 @@ export class TelegramBridge {
         turn,
         () => this.savePendingTurn(turn),
       );
+      this.deliveryAttempts = 0;
       await this.completeActiveTurn(turn);
     } catch (error) {
-      log(`response delivery failed: ${this.errorText(error)}`);
+      this.deliveryAttempts += 1;
+      log(
+        `response delivery failed (attempt ${this.deliveryAttempts}/${MAX_DELIVERY_ATTEMPTS}): ${this.errorText(error)}`,
+      );
+      if (this.deliveryAttempts >= MAX_DELIVERY_ATTEMPTS) {
+        await this.abandonDelivery(turn, error);
+        return;
+      }
       this.scheduleDeliveryRetry(turn);
     }
+  }
+
+  /**
+   * Some delivery failures never resolve — an attachment that is too large or
+   * has been deleted, for example. Give up rather than retrying forever, since
+   * an undelivered turn blocks every queued message behind it.
+   */
+  private async abandonDelivery(
+    turn: PendingTelegramTurn,
+    error: unknown,
+  ): Promise<void> {
+    const dropped = turn.completedResponse?.queuedAttachments.length ?? 0;
+    if (turn.completedResponse) {
+      turn.completedResponse.textDelivered = true;
+      turn.completedResponse.queuedAttachments = [];
+    }
+    log(
+      `giving up on Telegram turn ${turn.id} after ${MAX_DELIVERY_ATTEMPTS} attempts; dropped ${dropped} attachment(s)`,
+    );
+    await this.api
+      .sendTextReply(
+        turn.chatId,
+        turn.replyToMessageId,
+        `Could not finish delivering this reply: ${this.errorText(error)}` +
+          (dropped ? `\n\nDropped ${dropped} attachment(s).` : ""),
+      )
+      .catch((notifyError) =>
+        log(`failed to report delivery failure: ${this.errorText(notifyError)}`),
+      );
+    this.deliveryAttempts = 0;
+    await this.completeActiveTurn(turn);
   }
 
   private scheduleDeliveryRetry(turn: PendingTelegramTurn): void {
@@ -565,7 +610,7 @@ export class TelegramBridge {
     this.deliveryRetryTimer = setTimeout(() => {
       this.deliveryRetryTimer = undefined;
       void this.deliverCompletedTurn(turn);
-    }, 5000);
+    }, DELIVERY_RETRY_DELAY_MS);
   }
 
   private cancelDeliveryRetry(): void {
@@ -577,8 +622,14 @@ export class TelegramBridge {
     if (this.turnStartRetryTimer) return;
     this.turnStartRetryTimer = setTimeout(() => {
       this.turnStartRetryTimer = undefined;
-      void this.startNextTurnIfIdle();
+      this.startNextTurnSafely();
     }, 5000);
+  }
+
+  private startNextTurnSafely(): void {
+    void this.startNextTurnIfIdle().catch((error) =>
+      log(`failed to start next Telegram turn: ${this.errorText(error)}`),
+    );
   }
 
   private cancelTurnStartRetry(): void {
@@ -588,11 +639,18 @@ export class TelegramBridge {
 
   private async completeActiveTurn(turn: PendingTelegramTurn): Promise<void> {
     if (this.activeTelegramTurn !== turn) return;
-    await this.clearPendingTurn(turn);
+    try {
+      await this.clearPendingTurn(turn);
+    } catch (error) {
+      // The reply is already out; a stale journal entry must not wedge the
+      // queue. It is replayed at most once on the next restart.
+      log(`failed to clear pending turn ${turn.id}: ${this.errorText(error)}`);
+    }
     if (this.activeTelegramTurn !== turn) return;
     this.cancelDeliveryRetry();
+    this.deliveryAttempts = 0;
     this.activeTelegramTurn = undefined;
-    void this.startNextTurnIfIdle();
+    this.startNextTurnSafely();
   }
 
   private captureExtensionNotification(message: string): void {

@@ -13,6 +13,7 @@ export interface TelegramApiResponse<T> {
   result?: T;
   description?: string;
   error_code?: number;
+  parameters?: { retry_after?: number };
 }
 export interface TelegramUser {
   id: number;

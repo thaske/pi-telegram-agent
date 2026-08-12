@@ -36,7 +36,7 @@ describe("Telegram progress UI", () => {
   test("hides raw commands and shows only the current action", async () => {
     const { manager, messages } = progressHarness();
     const longCommand =
-      "git -C /home/wyse/Git/pi-telegram-agent status --short && find /home/wyse/Git/pi-telegram-agent/src -type f";
+      "git -C /home/user/Git/pi-telegram-agent status --short && find /home/user/Git/pi-telegram-agent/src -type f";
 
     manager.start(1, 10);
     manager.toolStart("bash-1", "bash", { command: longCommand });
@@ -71,15 +71,69 @@ describe("Telegram progress UI", () => {
     manager.toolEnd("bash-1", "bash", {}, false);
     await waitFor(() => messages.length === 2);
     manager.toolStart("read-1", "read", {
-      path: "/home/wyse/Git/pi-telegram-agent/src/telegram/progress.ts",
+      path: "/home/user/Git/pi-telegram-agent/src/telegram/progress.ts",
     });
     await waitFor(() => messages.length === 3);
 
     const latest = messages.at(-1) ?? "";
     expect(latest).toContain("Reading progress.ts");
     expect(latest).not.toContain("Actions:");
-    expect(latest).not.toContain("/home/wyse/Git");
+    expect(latest).not.toContain("/home/user/Git");
     expect(latest).not.toContain("earlier tool call");
+    manager.discard();
+  });
+
+  test("takes down a panel discarded while its first send was in flight", async () => {
+    const deleted: number[] = [];
+    let releaseSend: ((sent: { message_id: number }) => void) | undefined;
+    const api = {
+      sendMessage: () =>
+        new Promise<{ message_id: number }>((resolve) => {
+          releaseSend = resolve;
+        }),
+      editMessageText: async () => undefined,
+      deleteMessage: async (_chatId: number, messageId: number) => {
+        deleted.push(messageId);
+      },
+    } as unknown as TelegramApi;
+    const manager = new TelegramProgressManager(api);
+
+    manager.start(1, 10);
+    manager.toolStart("bash-1", "bash", { command: "pwd" });
+    // The turn finishes before Telegram acknowledges the panel.
+    manager.complete();
+    releaseSend?.({ message_id: 77 });
+    await waitFor(() => deleted.length === 1);
+
+    expect(deleted).toEqual([77]);
+    expect(manager.hasVisibleProgress()).toBe(false);
+  });
+
+  test("still renders the final update when it is coalesced mid-send", async () => {
+    const messages: string[] = [];
+    let releaseSend: ((sent: { message_id: number }) => void) | undefined;
+    const api = {
+      sendMessage: (_chatId: number, text: string) =>
+        new Promise<{ message_id: number }>((resolve) => {
+          messages.push(text);
+          releaseSend = resolve;
+        }),
+      editMessageText: async (_chatId: number, _messageId: number, text: string) => {
+        messages.push(text);
+      },
+      deleteMessage: async () => undefined,
+    } as unknown as TelegramApi;
+    const manager = new TelegramProgressManager(api);
+
+    manager.start(1, 10);
+    manager.toolStart("bash-1", "bash", { command: "pwd" });
+    await waitFor(() => messages.length === 1);
+    manager.fail("boom");
+    releaseSend?.({ message_id: 42 });
+    await waitFor(() => messages.length === 2);
+
+    expect(messages.at(-1)).toContain("❌ Error");
+    expect(messages.at(-1)).toContain("boom");
     manager.discard();
   });
 });

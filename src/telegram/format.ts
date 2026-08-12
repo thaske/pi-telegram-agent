@@ -10,6 +10,8 @@ function htmlEscape(text: string): string {
     .replaceAll(">", "&gt;");
 }
 
+const TOKEN_PATTERN = /\u0000(\d+)\u0000/g;
+
 function stash(
   text: string,
   pattern: RegExp,
@@ -58,33 +60,37 @@ export function formatTelegramText(text: string): FormattedTelegramText {
   // Inline formatting — stash results so subsequent regexes can't corrupt them
   formatted = stash(
     formatted,
-    /\*\*([^*\n][\s\S]*?[^*\n])\*\*/g,
+    /\*\*(?!\s)([\s\S]+?)(?<!\s)\*\*/g,
     replacements,
     (content) => `<b>${content}</b>`,
   );
   formatted = stash(
     formatted,
-    /__([^_\n][\s\S]*?[^_\n])__/g,
+    /__(?!\s)([\s\S]+?)(?<!\s)__/g,
     replacements,
     (content) => `<b>${content}</b>`,
   );
   formatted = stash(
     formatted,
-    /(^|[^*])\*([^*\n][^*\n]*?[^*\n])\*(?!\*)/g,
+    /(^|[^*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)/g,
     replacements,
     (before, content) => `${before}<i>${content}</i>`,
   );
   formatted = stash(
     formatted,
-    /(^|[^_])_([^_\n][^_\n]*?[^_\n])_(?!_)/g,
+    /(^|[^_\w])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])/g,
     replacements,
     (before, content) => `${before}<i>${content}</i>`,
   );
 
-  // Restore all stashed items
-  formatted = formatted.replace(/\u0000(\d+)\u0000/g, (_match, index: string) =>
-    replacements[Number(index)] ?? "",
-  );
+  // Restore all stashed items. Replacements can themselves contain tokens (for
+  // example inline code nested inside bold), so expand until none remain.
+  for (let pass = 0; pass <= replacements.length; pass++) {
+    if (!formatted.includes("\u0000")) break;
+    formatted = formatted.replace(TOKEN_PATTERN, (_match, index: string) =>
+      replacements[Number(index)] ?? "",
+    );
+  }
 
   return formatted === text ? { text } : { text: formatted, parseMode: "HTML" };
 }

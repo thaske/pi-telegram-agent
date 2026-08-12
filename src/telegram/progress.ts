@@ -56,6 +56,7 @@ interface ProgressState {
   messageId?: number;
   visible: boolean;
   completed: boolean;
+  cancelled?: boolean;
   failed?: string;
   thinkingActive: boolean;
   assistantStreaming: boolean;
@@ -68,6 +69,7 @@ interface ProgressState {
   initialTimer?: ReturnType<typeof setTimeout>;
   flushInFlight?: boolean;
   queuedFlush?: boolean;
+  queuedForce?: boolean;
 }
 
 export class TelegramProgressManager {
@@ -98,8 +100,11 @@ export class TelegramProgressManager {
 
   discard(): void {
     const state = this.state;
-    if (state?.flushTimer) clearTimeout(state.flushTimer);
-    if (state?.initialTimer) clearTimeout(state.initialTimer);
+    if (!state) return;
+    // A flush may already be in flight; mark the state so it does not resurrect
+    // an abandoned panel once its request completes.
+    state.cancelled = true;
+    this.clearTimers(state);
     this.state = undefined;
   }
 
@@ -252,16 +257,10 @@ export class TelegramProgressManager {
     if (!state) return;
     if (state.flushInFlight) {
       state.queuedFlush = true;
+      if (forceVisible) state.queuedForce = true;
       return;
     }
-    if (state.flushTimer) {
-      clearTimeout(state.flushTimer);
-      state.flushTimer = undefined;
-    }
-    if (state.initialTimer) {
-      clearTimeout(state.initialTimer);
-      state.initialTimer = undefined;
-    }
+    this.clearTimers(state);
     if (!forceVisible && !state.visible) return;
 
     state.flushInFlight = true;
@@ -269,22 +268,7 @@ export class TelegramProgressManager {
       const text = this.render(state);
       if (!text.trim() || text === state.lastSentText) return;
       const replyMarkup = state.completed ? undefined : this.stopMarkup();
-      if (!state.visible || state.messageId === undefined) {
-        const sent = await this.api.sendMessage(
-          state.chatId,
-          text,
-          replyMarkup,
-        );
-        state.messageId = sent.message_id;
-        state.visible = true;
-      } else {
-        await this.api.editMessageText(
-          state.chatId,
-          state.messageId,
-          text,
-          replyMarkup,
-        );
-      }
+      if (!(await this.publish(state, text, replyMarkup))) return;
       state.lastSentText = text;
     } catch (error) {
       log(
@@ -292,11 +276,56 @@ export class TelegramProgressManager {
       );
     } finally {
       state.flushInFlight = false;
-      if (state.queuedFlush) {
-        state.queuedFlush = false;
-        this.scheduleFlush();
-      }
+      this.drainQueuedFlush(state);
     }
+  }
+
+  private clearTimers(state: ProgressState): void {
+    if (state.flushTimer) clearTimeout(state.flushTimer);
+    state.flushTimer = undefined;
+    if (state.initialTimer) clearTimeout(state.initialTimer);
+    state.initialTimer = undefined;
+  }
+
+  private drainQueuedFlush(state: ProgressState): void {
+    if (!state.queuedFlush) return;
+    const forced = state.queuedForce ?? false;
+    state.queuedFlush = false;
+    state.queuedForce = false;
+    if (this.state !== state || state.cancelled) return;
+    // Keep the coalesced update's urgency: a forced or final render must still
+    // go out immediately instead of waiting for the throttle window, and a
+    // completed turn that is not yet visible would otherwise drop its last
+    // update entirely.
+    this.scheduleFlush(forced || state.completed);
+  }
+
+  /** Returns false when the panel was abandoned mid-send and taken back down. */
+  private async publish(
+    state: ProgressState,
+    text: string,
+    replyMarkup: TelegramInlineKeyboardMarkup | undefined,
+  ): Promise<boolean> {
+    if (state.visible && state.messageId !== undefined) {
+      await this.api.editMessageText(
+        state.chatId,
+        state.messageId,
+        text,
+        replyMarkup,
+      );
+      return true;
+    }
+    const sent = await this.api.sendMessage(state.chatId, text, replyMarkup);
+    if (state.cancelled) {
+      // The turn finished before this panel appeared; take it back down.
+      await this.api
+        .deleteMessage(state.chatId, sent.message_id)
+        .catch(() => undefined);
+      return false;
+    }
+    state.messageId = sent.message_id;
+    state.visible = true;
+    return true;
   }
 
   private render(state: ProgressState): string {
