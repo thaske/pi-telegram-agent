@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { TELEGRAM_PREFIX } from "../constants";
@@ -114,10 +113,15 @@ export async function buildTelegramFiles(
   return downloaded;
 }
 
+export function telegramTurnId(messages: TelegramMessage[]): string {
+  const first = messages[0];
+  if (!first) throw new Error("Missing Telegram message");
+  return `telegram:${first.chat.id}:${messages.map((message) => message.message_id).sort((a, b) => a - b).join(",")}`;
+}
+
 export async function createTelegramTurn(
   api: TelegramApi,
   messages: TelegramMessage[],
-  historyTurns: PendingTelegramTurn[] = [],
 ): Promise<PendingTelegramTurn> {
   const firstMessage = messages[0];
   if (!firstMessage) throw new Error("Missing Telegram message");
@@ -127,15 +131,7 @@ export async function createTelegramTurn(
     .join("\n\n");
   const files = await buildTelegramFiles(api, messages);
   let prompt = `${TELEGRAM_PREFIX}`;
-  if (historyTurns.length > 0) {
-    prompt +=
-      "\n\nEarlier Telegram messages arrived after an aborted turn. Treat them as prior user messages, in order:";
-    for (const [index, turn] of historyTurns.entries())
-      prompt += `\n\n${index + 1}. ${turn.historyText}`;
-    prompt += "\n\nCurrent Telegram message:";
-  }
-  if (rawText)
-    prompt += historyTurns.length > 0 ? `\n${rawText}` : ` ${rawText}`;
+  if (rawText) prompt += ` ${rawText}`;
   if (files.length)
     prompt +=
       "\n\nTelegram attachments were saved locally:" +
@@ -159,7 +155,7 @@ export async function createTelegramTurn(
       ? `\nAttachments:${files.map((f) => `\n- ${f.path}`).join("")}`
       : "");
   return {
-    id: randomUUID(),
+    id: telegramTurnId(messages),
     chatId: firstMessage.chat.id,
     replyToMessageId: firstMessage.message_id,
     queuedAttachments: [],

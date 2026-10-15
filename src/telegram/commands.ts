@@ -1,4 +1,4 @@
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { DurableTelegramAgent } from "../pi/durable-agent";
 
 import { TelegramApi } from "./api";
 import { TelegramModelPicker } from "./model-picker";
@@ -14,14 +14,10 @@ type TelegramCommand =
   | "start";
 
 interface TelegramCommandActions {
-  bindSession: () => Promise<void>;
-  clearQueuedTurns: () => void;
   discardPreview: () => void;
-  getQueueLength: () => number;
   hasPendingTurn: () => boolean;
-  getSession: () => AgentSession;
-  newSession: () => Promise<{ cancelled: boolean }>;
-  preserveQueuedTurnsAsHistory: () => void;
+  getSession: () => Pick<DurableTelegramAgent, "isStreaming" | "model" | "abort" | "compact" | "getStatus">;
+  newSession: () => Promise<void>;
 }
 
 const EXACT_COMMANDS = new Map<string, TelegramCommand>([
@@ -133,7 +129,6 @@ export class TelegramCommandHandler {
       return;
     }
 
-    if (this.actions.getQueueLength()) this.actions.preserveQueuedTurnsAsHistory();
     await session.abort();
     await this.reply(message, "Aborted current turn.");
   }
@@ -142,11 +137,9 @@ export class TelegramCommandHandler {
     if (!(await this.ensureIdle(message, "start a new chat"))) return;
 
     await this.reply(message, "Starting a new Pi chat...");
-    this.actions.clearQueuedTurns();
     this.actions.discardPreview();
-    const result = await this.actions.newSession();
-    if (!result.cancelled) await this.reply(message, "New Pi chat started.");
-    await this.actions.bindSession();
+    await this.actions.newSession();
+    await this.reply(message, "New Pi chat started.");
   }
 
   private async showModelPicker(message: TelegramMessage): Promise<void> {
@@ -179,17 +172,15 @@ export class TelegramCommandHandler {
 
   private async status(message: TelegramMessage): Promise<void> {
     const session = this.actions.getSession();
-    const stats = session.getSessionStats();
-    const usage = session.getContextUsage();
+    const stats = await session.getStatus();
     const lines = [
       `Model: ${session.model ? `${session.model.provider}/${session.model.id}` : "unknown"}`,
       `Messages: ${stats.totalMessages}`,
       `Cost: $${stats.cost.toFixed(3)}`,
     ];
-    if (usage) {
-      lines.push(
-        `Context: ${usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?"}/${usage.contextWindow ?? session.model?.contextWindow ?? "?"}`,
-      );
+    if (stats.contextTokens !== undefined) {
+      const percent = stats.contextWindow ? `${(stats.contextTokens / stats.contextWindow * 100).toFixed(1)}%` : "?";
+      lines.push(`Context: ${percent}/${stats.contextWindow ?? "?"}`);
     }
     await this.reply(message, lines.join("\n"));
   }
@@ -197,7 +188,7 @@ export class TelegramCommandHandler {
   private async start(message: TelegramMessage): Promise<void> {
     await this.reply(
       message,
-      "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /goal, /stop.",
+      "Send me a message and I will forward it to Pi. Commands: /new, /status, /model, /compact, /stop.",
     );
   }
 

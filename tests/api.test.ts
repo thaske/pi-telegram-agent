@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { TelegramApi } from "../src/telegram/api";
 
-test("publishes /goal in Telegram command suggestions", async () => {
+test("publishes the supported Telegram command suggestions", async () => {
   const api = new TelegramApi(() => ({ botToken: "test-token" }));
   let commands: Array<{ command: string; description: string }> | undefined;
   api.call = async <TResponse>(
@@ -16,8 +16,7 @@ test("publishes /goal in Telegram command suggestions", async () => {
 
   await api.configureCommands();
 
-  expect(commands).toContainEqual({
-    command: "goal",
-    description: "Set or manage a long-running Pi goal",
-  });
+  expect(commands?.map((command) => command.command)).toEqual([
+    "new", "status", "model", "compact", "stop",
+  ]);
 });

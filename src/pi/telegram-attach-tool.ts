@@ -1,68 +1,45 @@
 import { stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 
 import { MAX_ATTACHMENTS_PER_TURN } from "../constants";
-import type { PendingTelegramTurn } from "../telegram/types";
+import { TelegramState } from "./durable-state";
 
-export function createTelegramAttachTool(
-  getActiveTurn: () => PendingTelegramTurn | undefined,
-  saveActiveTurn: (turn: PendingTelegramTurn) => Promise<void>,
-) {
+export function createTelegramAttachTool() {
   return defineTool({
     name: "telegram_attach",
-    label: "Telegram Attach",
-    description:
-      "Queue one or more local files to be sent with the next Telegram reply.",
-    promptSnippet: "Queue local files to be sent with the next Telegram reply.",
-    promptGuidelines: [
-      "When handling a [telegram] message and the user asked for a file or generated artifact, call telegram_attach with the local path instead of only mentioning the path in text.",
-    ],
+    description: "Queue local files to be sent with the current Telegram reply.",
+    replay: "safe",
     parameters: Type.Object({
       paths: Type.Array(
-        Type.String({ description: "Local file path to attach" }),
+        Type.String({ description: "Local file path to attach, relative to the agent working directory" }),
         { minItems: 1, maxItems: MAX_ATTACHMENTS_PER_TURN },
       ),
     }),
-    async execute(_toolCallId, params) {
-      const activeTelegramTurn = getActiveTurn();
-      if (!activeTelegramTurn)
-        throw new Error(
-          "telegram_attach can only be used while replying to an active Telegram turn",
-        );
-      if (
-        activeTelegramTurn.queuedAttachments.length + params.paths.length >
-        MAX_ATTACHMENTS_PER_TURN
-      )
-        throw new Error(
-          `Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`,
-        );
-      for (const inputPath of params.paths) {
-        const stats = await stat(inputPath);
-        if (!stats.isFile()) throw new Error(`Not a file: ${inputPath}`);
+    async execute(params, api, context) {
+      const paths = params.paths.map((path) => resolve(api.env?.cwd ?? process.cwd(), path));
+      for (const path of paths) {
+        const stats = await stat(path);
+        if (!stats.isFile()) throw new Error(`Not a file: ${path}`);
       }
-
-      const added = [...params.paths];
-      const previousLength = activeTelegramTurn.queuedAttachments.length;
-      activeTelegramTurn.queuedAttachments.push(
-        ...added.map((path) => ({ path, fileName: basename(path) })),
-      );
-      try {
-        await saveActiveTurn(activeTelegramTurn);
-      } catch (error) {
-        activeTelegramTurn.queuedAttachments.splice(previousLength);
-        throw error;
-      }
+      await api.commit(async (tx) => {
+        const state = await tx.doc(TelegramState);
+        const turn = state.turns[0];
+        if (!turn || turn.conversationId !== api.conversationId || turn.completedResponse)
+          throw new Error("No active Telegram turn for this conversation");
+        // A crash between this commit and the tool result must not queue files twice.
+        if (turn.attachmentTaskIds?.includes(api.taskId)) return;
+        if (turn.queuedAttachments.length + paths.length > MAX_ATTACHMENTS_PER_TURN)
+          throw new Error(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
+        turn.queuedAttachments.push(...paths.map((path) => ({ path, fileName: basename(path) })));
+        if (!turn.attachmentTaskIds) turn.attachmentTaskIds = [];
+        turn.attachmentTaskIds.push(api.taskId);
+      }, context);
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Queued ${added.length} Telegram attachment(s).`,
-          },
-        ],
-        details: { paths: added },
+        output: [{ type: "text", text: `Queued ${paths.length} Telegram attachment(s).` }],
+        details: { paths },
       };
     },
   });

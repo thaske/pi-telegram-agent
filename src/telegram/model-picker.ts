@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { DurableTelegramAgent } from "../pi/durable-agent";
 
 import { getOpenRouterPopularityRanks } from "../openrouter-rankings";
 import { TelegramApi } from "./api";
@@ -15,7 +15,7 @@ export class TelegramModelPicker {
 
   constructor(
     private readonly api: TelegramApi,
-    private readonly getSession: () => AgentSession,
+    private readonly getSession: () => Pick<DurableTelegramAgent, "isStreaming" | "model" | "models" | "setModel">,
   ) {}
 
   hasPendingSearch(chatId: number): boolean {
@@ -166,7 +166,7 @@ export class TelegramModelPicker {
   private async getAvailableModels(query?: string) {
     const normalized = query?.trim().toLowerCase();
     const ranks = await getOpenRouterPopularityRanks().catch(() => undefined);
-    const models = await this.getSession().modelRuntime.getAvailable();
+    const models = await this.getSession().models.getAvailable();
     return models.filter((model) => {
         if (!normalized) return true;
         return [

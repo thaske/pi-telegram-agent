@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ConversationId } from "@earendil-works/pi-durable";
 
 export interface TelegramConfig {
   botToken?: string;
@@ -149,8 +150,8 @@ export interface PendingTelegramTurn {
   queuedAttachments: QueuedAttachment[];
   content: Array<TextContent | ImageContent>;
   historyText: string;
-  extensionCommand?: string;
-  extensionResponseText?: string;
+  conversationId?: ConversationId;
+  attachmentTaskIds?: number[];
   completedResponse?: PendingTelegramResponse;
 }
 export interface TelegramPreviewState {
@@ -165,4 +166,5 @@ export interface TelegramPreviewState {
 export interface TelegramMediaGroupState {
   messages: TelegramMessage[];
   flushTimer?: ReturnType<typeof setTimeout>;
+  flushing?: boolean;
 }

@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
-
 import type { TelegramApi } from "../src/telegram/api";
 import { TelegramCommandHandler } from "../src/telegram/commands";
 import type { TelegramModelPicker } from "../src/telegram/model-picker";
@@ -17,7 +15,6 @@ describe("Telegram command lifecycle guard", () => {
   test("does not allow /new to discard a turn awaiting delivery", async () => {
     const replies: string[] = [];
     let sessionsStarted = 0;
-    let queuesCleared = 0;
     const handler = new TelegramCommandHandler(
       {
         sendTextReply: async (_chatId: number, _replyTo: number, text: string) => {
@@ -28,19 +25,18 @@ describe("Telegram command lifecycle guard", () => {
         hasPendingSearch: () => false,
       } as unknown as TelegramModelPicker,
       {
-        bindSession: async () => undefined,
-        clearQueuedTurns: () => {
-          queuesCleared += 1;
-        },
         discardPreview: () => undefined,
-        getQueueLength: () => 0,
         hasPendingTurn: () => true,
-        getSession: () => ({ isStreaming: false }) as AgentSession,
+        getSession: () => ({
+          isStreaming: false,
+          model: undefined,
+          abort: async () => undefined,
+          compact: async () => undefined,
+          getStatus: async () => ({ totalMessages: 0, cost: 0 }),
+        }),
         newSession: async () => {
           sessionsStarted += 1;
-          return { cancelled: false };
         },
-        preserveQueuedTurnsAsHistory: () => undefined,
       },
     );
 
@@ -49,6 +45,5 @@ describe("Telegram command lifecycle guard", () => {
       "Cannot start a new chat while the previous response is still being delivered. Try again shortly.",
     ]);
     expect(sessionsStarted).toBe(0);
-    expect(queuesCleared).toBe(0);
   });
 });

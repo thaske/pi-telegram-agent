@@ -1,18 +1,17 @@
 # pi-telegram-agent
 
-Standalone Telegram frontend for Pi using the `@earendil-works/pi-coding-agent` SDK.
+Standalone Telegram frontend for Pi using `@earendil-works/pi-durable`.
 
 ```text
-systemd → bun run src/main.ts → Pi AgentSessionRuntime
+systemd → bun run src/main.ts → pi-durable Harness → SQLite
 ```
 
 ## Features
 
-- Loads normal Pi config from `~/.pi/agent`:
-  - `settings.json`
-  - `auth.json`
-  - models
-  - skills/extensions discovered by Pi's default resource loader
+- Reuses Pi's configuration services for `settings.json`, `auth.json`, `models.json`, skills, context files, and `SYSTEM.md` / `APPEND_SYSTEM.md`.
+- Runs native durable `read`, `bash`, `edit`, and `write` tools in `PI_TELEGRAM_CWD`.
+- Persists conversations, model/tool checkpoints, the Telegram queue, buffered albums, attachment intents, and reply-delivery receipts in SQLite.
+- Resumes interrupted runs from their last committed checkpoint. Stable Telegram request IDs prevent redelivery from submitting the same input twice.
 - Polls Telegram directly.
 - Registers Telegram bot command suggestions:
   - `/new`
@@ -20,14 +19,29 @@ systemd → bun run src/main.ts → Pi AgentSessionRuntime
   - `/compact`
   - `/model`
   - `/stop`
-- Starts by continuing the most recent Pi session for `PI_TELEGRAM_CWD`, so systemd restarts keep chat history.
-- `/new` calls `AgentSessionRuntime.newSession()` directly; no fake terminal or `screen` required.
+- Reopens the selected durable conversation after a restart.
+- `/new` creates and durably selects a fresh conversation, preserving the current model and keeping older conversations in storage.
 - `/model` opens a Telegram inline keyboard to select or search any authenticated Pi model, sorted by OpenRouter weekly popularity when available.
 - Streams assistant previews back to Telegram, using Bot API 10.1 rich message drafts when available.
-- Shows a throttled in-chat progress panel for long turns, including safe thinking status, tool-call lifecycle summaries, extension status updates, elapsed time, and a Stop button.
+- Shows a throttled in-chat progress panel for long turns, including safe thinking status, tool-call lifecycle summaries, retries/compaction, elapsed time, and a Stop button.
 - Sends assistant output as Bot API 10.1 rich Markdown messages when available (headings, lists, tables, media blocks, quotes, footnotes, formulas, and nested formatting), with automatic fallback to legacy Telegram HTML formatting.
 - Supports Telegram image/file downloads.
 - Provides a `telegram_attach` tool so Pi can send generated files back to Telegram.
+
+## Migration from the SDK runtime
+
+The bot now uses native `pi-durable` conversations and tasks, not `AgentSessionRuntime`. `pi-coding-agent` remains a dependency **only for configuration/resource/model-auth services**.
+
+- The first durable startup begins a new conversation. Existing Pi SDK JSONL sessions are left untouched and are not automatically imported.
+- An existing `pending-turn.json` is imported before its legacy journal is removed. A completed reply retries delivery only; an unfinished legacy turn is submitted once to the new conversation.
+- SDK extensions, their custom tools/commands, and MCP integrations are not loaded: their APIs are not compatible with durable extensions. The old goal command integration has been removed.
+- The supported Telegram commands are `/new`, `/status`, `/model`, `/compact`, and `/stop`. SDK prompt-template and skill slash commands are not interpreted. Skills remain discoverable and readable by the model.
+- Project resources follow saved Pi trust decisions (`trust.json`), falling back to the global `defaultProjectTrust` setting. In this headless process, `ask` means project resources are skipped until trusted.
+- Model defaults/thinking, retry/transport settings, compaction thresholds, shell path, and the durable subset of `defaultTools` are reused. Extension-specific and terminal settings do not apply.
+
+Durable tools follow their own replay policies: completed calls are not repeated; interrupted calls only rerun when declared replay-safe. `/stop` aborts the current run; shutting down suspends it for the next process. Queued Telegram turns remain queued.
+
+Telegram sends cannot be part of a SQLite transaction. Delivery receipts prevent resending acknowledged text/files, but a crash after Telegram accepts a send and before its receipt commits can still duplicate that send.
 
 ## Config
 
@@ -61,6 +75,7 @@ Optional environment variables:
 PI_TELEGRAM_CONFIG=~/.pi/agent/telegram.json
 PI_TELEGRAM_TMP=~/.pi/agent/tmp/telegram-agent
 PI_TELEGRAM_CWD=~
+PI_TELEGRAM_STORAGE=/path/to/state.sqlite
 EXA_API_KEY=...
 ```
 
@@ -68,17 +83,23 @@ EXA_API_KEY=...
 
 `PI_TELEGRAM_CWD` controls the working directory for the Pi agent session, including where commands run and how relative paths are resolved. If unset, it defaults to the directory where this process is started.
 
-## Typecheck
+`PI_TELEGRAM_STORAGE` overrides the SQLite file. By default it is `<agent-dir>/telegram-agent/<cwd-hash>/state.sqlite`, where `<agent-dir>` is normally `~/.pi/agent` (or `PI_CODING_AGENT_DIR`). Keep it outside temporary download directories and run **only one process per database**. The storage does not provide cross-process locking.
+
+## Checks
 
 ```bash
 bun run typecheck
+bun test
+bun run lint
 ```
+
+Tests use an offline faux model, including SQLite reopen, tool replay, attachment idempotency, queued delivery, and Telegram redelivery. The SQLite adapter uses `node:sqlite`; Bun 1.4.2 is tested.
 
 ## Example systemd user service
 
 ```ini
 [Unit]
-Description=Pi Telegram SDK agent
+Description=Pi Telegram durable agent
 After=network-online.target
 Wants=network-online.target
 

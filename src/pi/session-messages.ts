@@ -1,40 +1,30 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { MessageChange } from "@earendil-works/pi-durable";
 
-export function isAssistantMessage(message: AgentMessage): boolean {
-  return (message as unknown as { role?: string }).role === "assistant";
-}
-
-export function getMessageText(message: AgentMessage): string {
-  const content = (message as unknown as { content?: unknown[] }).content ?? [];
-  return content
-    .filter(
-      (b): b is { type: string; text?: string } =>
-        typeof b === "object" &&
-        b !== null &&
-        (b as { type?: unknown }).type === "text",
-    )
-    .map((b) => b.text ?? "")
+export function getMessageText(message: Message): string {
+  if (typeof message.content === "string") return message.content.trim();
+  return message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
     .join("")
     .trim();
 }
 
-export function extractAssistantText(messages: AgentMessage[]): {
-  text?: string;
-  stopReason?: string;
-  errorMessage?: string;
-} {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as unknown as {
-      role?: string;
-      stopReason?: string;
-      errorMessage?: string;
-    };
-    if (m.role !== "assistant") continue;
-    return {
-      text: getMessageText(messages[i]),
-      stopReason: m.stopReason,
-      errorMessage: m.errorMessage,
-    };
+/** Reconstruct the committed partial from pi-durable's incremental message events. */
+export function applyMessageChanges(
+  message: AssistantMessage | undefined,
+  changes: readonly MessageChange[],
+): AssistantMessage | undefined {
+  for (const change of changes) {
+    if (change.type === "message") {
+      message = structuredClone(change.message);
+    } else if (message && "block" in change) {
+      message.content[change.contentIndex] = structuredClone(change.block);
+    } else if (message && (change.type === "text_delta" || change.type === "thinking_delta")) {
+      const block = message.content[change.contentIndex];
+      if (block?.type === "text" && change.type === "text_delta") block.text += change.delta;
+      if (block?.type === "thinking" && change.type === "thinking_delta") block.thinking += change.delta;
+    }
   }
-  return {};
+  return message;
 }

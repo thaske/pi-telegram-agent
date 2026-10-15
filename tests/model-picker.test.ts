@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { DurableTelegramAgent } from "../src/pi/durable-agent";
 
 import type { TelegramApi } from "../src/telegram/api";
 import { TelegramModelPicker } from "../src/telegram/model-picker";
@@ -34,11 +34,11 @@ function pickerHarness(): {
   const session = {
     isStreaming: false,
     model: MODELS[0],
-    modelRuntime: { getAvailable: async () => MODELS },
+    models: { getAvailable: async () => MODELS },
     setModel: async (model: { provider: string; id: string }) => {
       selected.push(`${model.provider}/${model.id}`);
     },
-  } as unknown as AgentSession;
+  } as unknown as DurableTelegramAgent;
   return { picker: new TelegramModelPicker(api, () => session), selected };
 }
 
