@@ -16,6 +16,10 @@ function message(id: number): TelegramMessage {
 function captureReplies(bridge: TelegramBridge): string[] {
   const replies: string[] = [];
   bridge.api.call = async <TResponse>() => true as TResponse;
+  bridge.api.sendTextChunk = async (_chatId, chunk) => {
+    replies.push(chunk.text);
+    return { message_id: replies.length };
+  };
   bridge.api.sendTextReply = async (_chatId, _replyTo, text) => {
     replies.push(text);
   };

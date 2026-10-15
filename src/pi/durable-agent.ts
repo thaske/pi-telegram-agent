@@ -2,18 +2,23 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Model, Models } from "@earendil-works/pi-ai";
 import {
   AssistantEntry,
+  CompactionTask,
+  configure,
   Harness,
+  LiveDoc,
   watchEvents,
   type AgentChange,
   type AgentEvent,
   type AgentEventStream,
   type Conversation,
+  type CompactionResult,
+  type TaskId,
   type HarnessOptions,
   type Storage,
 } from "@earendil-works/pi-durable";
 
 import type { PendingTelegramTurn, QueuedAttachment, TelegramMessage } from "../telegram/types";
-import { DurableTelegramState, TelegramState } from "./durable-state";
+import { DurableTelegramState, initializeReceipts, TelegramState, toJson } from "./durable-state";
 import { getMessageText } from "./session-messages";
 
 export interface TelegramAgentStatus {
@@ -30,6 +35,12 @@ export interface TelegramTurnResult {
   queuedAttachments: QueuedAttachment[];
 }
 
+function unansweredResult(reason: string, detail: unknown): TelegramTurnResult {
+  return reason === "aborted"
+    ? { aborted: true, queuedAttachments: [] }
+    : { error: typeof detail === "string" ? detail : `Pi could not answer: ${reason}`, queuedAttachments: [] };
+}
+
 export class DurableTelegramAgent {
   readonly state: DurableTelegramState;
   private conversation!: Conversation;
@@ -37,6 +48,8 @@ export class DurableTelegramAgent {
   private events: AgentEventStream | undefined;
   private readonly listeners = new Set<(event: AgentEvent) => void>();
   private activeOperation = false;
+  private runningTurnId: string | undefined;
+  private abortRequestedTurnId: string | undefined;
   private currentModel: Model<string> | undefined;
 
   private constructor(
@@ -62,7 +75,9 @@ export class DurableTelegramAgent {
         : await harness.conversation(state.conversationId, BACKGROUND_CONTEXT);
       if (!conversation) throw new Error(`Missing durable conversation ${state?.conversationId}`);
       await harness.commit(async (tx) => {
-        (await tx.doc(TelegramState)).conversationId = conversation.id;
+        const telegram = await tx.doc(TelegramState);
+        telegram.conversationId = conversation.id;
+        initializeReceipts(telegram);
       }, BACKGROUND_CONTEXT);
       await agent.bind(conversation);
       return agent;
@@ -101,7 +116,12 @@ export class DurableTelegramAgent {
     if (this.activeOperation) throw new Error("Another agent operation is already running");
     this.activeOperation = true;
     let events: AgentEventStream | undefined;
+    this.runningTurnId = turn.id;
     try {
+      if (await this.state.wasStopped(turn.id)) {
+        await this.conversation.abort(BACKGROUND_CONTEXT);
+        return { aborted: true, queuedAttachments: [] };
+      }
       events = await watchEvents(this.harness, this.conversationId, BACKGROUND_CONTEXT);
       this.events = events;
       this.publish(events.snapshot);
@@ -113,15 +133,9 @@ export class DurableTelegramAgent {
         content: turn.content,
         requestId: turn.id,
       }, BACKGROUND_CONTEXT);
+      if (this.abortRequestedTurnId === turn.id) await this.conversation.abort(BACKGROUND_CONTEXT);
       const settled = await submission.wait(BACKGROUND_CONTEXT);
-      if (settled.status === "unanswered") {
-        return settled.reason === "aborted"
-          ? { aborted: true, queuedAttachments: [] }
-          : {
-              error: typeof settled.detail === "string" ? settled.detail : `Pi could not answer: ${settled.reason}`,
-              queuedAttachments: [],
-            };
-      }
+      if (settled.status === "unanswered") return unansweredResult(settled.reason, settled.detail);
       if (settled.type !== "input") throw new Error("Expected an input submission");
       const answer = await this.conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
       const message = answer?.model?.find((item) => item.role === "assistant");
@@ -129,22 +143,35 @@ export class DurableTelegramAgent {
       return { text: message ? getMessageText(message) : undefined, queuedAttachments: saved?.queuedAttachments ?? [] };
     } finally {
       this.activeOperation = false;
+      this.runningTurnId = undefined;
+      if (this.abortRequestedTurnId === turn.id) this.abortRequestedTurnId = undefined;
       if (this.events === events) this.events = undefined;
       await events?.stop();
     }
   }
 
-  async newSession(): Promise<void> {
+  async newSession(requestId?: string): Promise<void> {
+    if (requestId && await this.state.command(requestId)) return;
     if (this.isStreaming || (await this.state.pendingTurns()).length || (await this.state.bufferedMedia()).length)
       throw new Error("Cannot start a new chat while Telegram work is pending");
     const current = await this.conversation.agent(BACKGROUND_CONTEXT);
-    const conversation = await this.harness.createConversation({
-      ownership: { kind: "ownerless" },
-      agent: { ...this.initialAgent, model: current.model, thinkingLevel: current.thinkingLevel, cwd: current.cwd },
-      init: async (tx, id) => {
-        (await tx.doc(TelegramState)).conversationId = id;
-      },
+    const id = await this.harness.commit(async (tx) => {
+      const state = await tx.doc(TelegramState);
+      if (requestId && state.commands?.[requestId]) return undefined;
+      const created = await tx.createConversation({ ownership: { kind: "ownerless" } });
+      await configure(tx, created.id, {
+        ...this.initialAgent, model: current.model, thinkingLevel: current.thinkingLevel, cwd: current.cwd,
+      });
+      state.conversationId = created.id;
+      if (requestId) {
+        state.commands ??= {};
+        state.commands[requestId] = { kind: "new", conversationId: created.id };
+      }
+      return created.id;
     }, BACKGROUND_CONTEXT);
+    if (id === undefined) return;
+    const conversation = await this.harness.conversation(id, BACKGROUND_CONTEXT);
+    if (!conversation) throw new Error(`Missing durable conversation ${id}`);
     this.view.dispose();
     await this.bind(conversation);
   }
@@ -155,23 +182,74 @@ export class DurableTelegramAgent {
     this.currentModel = model;
   }
 
-  async abort(): Promise<void> {
-    await this.conversation.abort(BACKGROUND_CONTEXT);
+  async abort(requestId?: string): Promise<void> {
+    if (!requestId) {
+      this.abortRequestedTurnId = this.runningTurnId;
+      return this.conversation.abort(BACKGROUND_CONTEXT);
+    }
+    // Persist the original target before aborting. A redelivered Stop must not
+    // abort a later Telegram turn or a later manual compaction.
+    const receipt = await this.harness.commit(async (tx) => {
+      const state = await tx.doc(TelegramState);
+      const existing = state.commands?.[requestId];
+      if (existing?.kind === "stop") return toJson(existing);
+      const live = await tx.doc(LiveDoc, this.conversationId);
+      const value = toJson({
+        kind: "stop" as const, turnId: this.runningTurnId ?? (live.run ? state.turns[0]?.id : undefined),
+        compactionIds: (live.compactions ?? []).map((item) => item.taskId),
+      });
+      state.commands ??= {};
+      state.commands[requestId] = value;
+      return value;
+    }, BACKGROUND_CONTEXT);
+    if (receipt.turnId && (await this.state.pendingTurns())[0]?.id === receipt.turnId) {
+      this.abortRequestedTurnId = receipt.turnId;
+      await this.conversation.abort(BACKGROUND_CONTEXT);
+    } else {
+      for (const id of receipt.compactionIds) await this.harness.abortTask(id, BACKGROUND_CONTEXT);
+    }
+  }
+
+  async startCompaction(requestId?: string, reply?: { chatId: number; replyToMessageId: number }): Promise<TaskId<CompactionResult>> {
+    const previous = requestId ? await this.state.command(requestId) : undefined;
+    if (previous?.kind === "compact") return previous.taskId;
+    if (this.isStreaming) throw new Error("Cannot compact while Pi is busy");
+    const id = await this.harness.commit(async (tx) => {
+      const state = await tx.doc(TelegramState);
+      const existing = requestId ? state.commands?.[requestId] : undefined;
+      if (existing?.kind === "compact") return existing.taskId;
+      const live = await tx.doc(LiveDoc, this.conversationId);
+      const taskId = await tx.createTask(CompactionTask, { reason: "manual" }, {
+        ownership: { kind: "conversation" }, conversationId: this.conversationId,
+      });
+      live.compactions ??= [];
+      live.compactions.push({ taskId, reason: "manual", blocking: false, attempt: 1 });
+      if (requestId && reply) {
+        state.commands ??= {};
+        state.commands[requestId] = { kind: "compact", taskId, ...reply };
+      }
+      return taskId;
+    }, BACKGROUND_CONTEXT);
+    this.harness.resume();
+    return id;
+  }
+
+  async waitForCompaction(id: TaskId<CompactionResult>): Promise<void> {
+    const { outcome } = (await this.harness.waitForTask(id, BACKGROUND_CONTEXT)).state;
+    if (outcome.status !== "completed")
+      throw new Error(outcome.status === "failed" || outcome.status === "faulted" ? outcome.error.message : `Compaction ${outcome.status}`);
+    if (outcome.result.submissionId !== undefined) {
+      const submission = await this.harness.submission(outcome.result.submissionId, BACKGROUND_CONTEXT);
+      const placed = await submission?.wait(BACKGROUND_CONTEXT);
+      if (placed?.status !== "done") throw new Error("Compaction summary was not applied");
+    }
   }
 
   async compact(): Promise<void> {
-    if (this.isStreaming) throw new Error("Cannot compact while Pi is busy");
+    const id = await this.startCompaction();
     this.activeOperation = true;
     try {
-      const id = await this.conversation.compact(undefined, BACKGROUND_CONTEXT);
-      const { outcome } = (await this.harness.waitForTask(id, BACKGROUND_CONTEXT)).state;
-      if (outcome.status !== "completed")
-        throw new Error(outcome.status === "failed" || outcome.status === "faulted" ? outcome.error.message : `Compaction ${outcome.status}`);
-      if (outcome.result.submissionId !== undefined) {
-        const submission = await this.harness.submission(outcome.result.submissionId, BACKGROUND_CONTEXT);
-        const placed = await submission?.wait(BACKGROUND_CONTEXT);
-        if (placed?.status !== "done") throw new Error("Compaction summary was not applied");
-      }
+      await this.waitForCompaction(id);
     } finally {
       this.activeOperation = false;
     }

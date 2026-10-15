@@ -22,6 +22,8 @@ let cachedRanks:
   | { expiresAt: number; ranks: Map<string, number> }
   | undefined;
 
+let refresh: Promise<Map<string, number>> | undefined;
+
 function normalizeSlug(slug: string): string {
   return slug.trim().toLowerCase();
 }
@@ -48,9 +50,10 @@ function rowTokens(row: RankingRow): number {
   );
 }
 
-async function fetchRankingsActionId(): Promise<string> {
+async function fetchRankingsActionId(signal: AbortSignal): Promise<string> {
   try {
     const htmlResponse = await fetch(RANKINGS_URL, {
+      signal,
       headers: { "user-agent": "Mozilla/5.0" },
     });
     if (!htmlResponse.ok) throw new Error(`HTTP ${htmlResponse.status}`);
@@ -65,6 +68,7 @@ async function fetchRankingsActionId(): Promise<string> {
     for (const chunkUrl of chunkUrls) {
       const url = new URL(chunkUrl, RANKINGS_URL).toString();
       const chunkResponse = await fetch(url, {
+        signal,
         headers: { "user-agent": "Mozilla/5.0" },
       });
       if (!chunkResponse.ok) continue;
@@ -80,9 +84,10 @@ async function fetchRankingsActionId(): Promise<string> {
   return FALLBACK_MODEL_RANKINGS_ACTION_ID;
 }
 
-async function fetchWeeklyRankingRows(): Promise<RankingRow[]> {
-  const actionId = await fetchRankingsActionId();
+async function fetchWeeklyRankingRows(signal: AbortSignal): Promise<RankingRow[]> {
+  const actionId = await fetchRankingsActionId(signal);
   const response = await fetch(RANKINGS_URL, {
+    signal,
     method: "POST",
     headers: {
       "content-type": "text/plain;charset=UTF-8",
@@ -99,8 +104,9 @@ async function fetchWeeklyRankingRows(): Promise<RankingRow[]> {
   return Array.isArray(rows) ? (rows as RankingRow[]) : [];
 }
 
-async function fetchOpenRouterModels(): Promise<OpenRouterModel[]> {
+async function fetchOpenRouterModels(signal: AbortSignal): Promise<OpenRouterModel[]> {
   const response = await fetch(MODELS_URL, {
+    signal,
     headers: { "user-agent": "Mozilla/5.0" },
   });
   if (!response.ok) throw new Error(`OpenRouter models HTTP ${response.status}`);
@@ -108,10 +114,10 @@ async function fetchOpenRouterModels(): Promise<OpenRouterModel[]> {
   return Array.isArray(body.data) ? body.data : [];
 }
 
-async function buildPopularityRanks(): Promise<Map<string, number>> {
+async function buildPopularityRanks(signal: AbortSignal): Promise<Map<string, number>> {
   const [rows, models] = await Promise.all([
-    fetchWeeklyRankingRows(),
-    fetchOpenRouterModels().catch(() => []),
+    fetchWeeklyRankingRows(signal),
+    fetchOpenRouterModels(signal).catch(() => []),
   ]);
 
   const totals = new Map<string, number>();
@@ -140,10 +146,24 @@ async function buildPopularityRanks(): Promise<Map<string, number>> {
   return ranks;
 }
 
+/** Optional ranking data never sits on the command/polling critical path. */
+export function getCachedOpenRouterPopularityRanks(): Map<string, number> | undefined {
+  if (!cachedRanks || cachedRanks.expiresAt <= Date.now()) void getOpenRouterPopularityRanks();
+  return cachedRanks?.ranks;
+}
+
 export async function getOpenRouterPopularityRanks(): Promise<Map<string, number>> {
-  const now = Date.now();
-  if (cachedRanks && cachedRanks.expiresAt > now) return cachedRanks.ranks;
-  const ranks = await buildPopularityRanks();
-  cachedRanks = { ranks, expiresAt: now + CACHE_TTL_MS };
-  return ranks;
+  if (cachedRanks && cachedRanks.expiresAt > Date.now()) return cachedRanks.ranks;
+  refresh ??= buildPopularityRanks(AbortSignal.timeout(2000))
+    .then((ranks) => {
+      cachedRanks = { ranks, expiresAt: Date.now() + CACHE_TTL_MS };
+      return ranks;
+    })
+    .catch(() => {
+      const ranks = cachedRanks?.ranks ?? new Map<string, number>();
+      cachedRanks = { ranks, expiresAt: Date.now() + 60_000 };
+      return ranks;
+    })
+    .finally(() => { refresh = undefined; });
+  return refresh;
 }

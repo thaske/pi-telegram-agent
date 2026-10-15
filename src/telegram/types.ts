@@ -1,5 +1,5 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import type { CompactionResult, ConversationId, TaskId } from "@earendil-works/pi-durable";
 
 export interface TelegramConfig {
   botToken?: string;
@@ -138,9 +138,28 @@ export interface QueuedAttachment {
   path: string;
   fileName: string;
 }
+export interface TelegramTextChunk {
+  text: string;
+  mode: "rich" | "legacy";
+}
+
+export type TelegramCommandReceipt =
+  | { kind: "new"; conversationId: ConversationId }
+  | { kind: "stop"; turnId?: string; compactionIds: TaskId<CompactionResult>[] }
+  | {
+      kind: "compact";
+      taskId: TaskId<CompactionResult>;
+      chatId: number;
+      replyToMessageId: number;
+      replyQueued?: boolean;
+    };
+
 export interface PendingTelegramResponse {
   text?: string;
   textDelivered: boolean;
+  /** Frozen physical send plan and cursor; optional for pre-outbox journals. */
+  textChunks?: TelegramTextChunk[];
+  sentTextChunks?: number;
   queuedAttachments: QueuedAttachment[];
 }
 export interface PendingTelegramTurn {
@@ -152,12 +171,14 @@ export interface PendingTelegramTurn {
   historyText: string;
   conversationId?: ConversationId;
   attachmentTaskIds?: number[];
+  previewMessageIds?: number[];
   completedResponse?: PendingTelegramResponse;
 }
 export interface TelegramPreviewState {
   mode: "draft" | "message";
   replyToMessageId?: number;
   draftId?: number;
+  draftKind?: "rich" | "legacy";
   messageId?: number;
   pendingText: string;
   lastSentText: string;

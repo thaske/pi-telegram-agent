@@ -46,8 +46,10 @@ export function chunkParagraphs(
 
       let remaining = paragraph;
       while (remaining.length > maxLength) {
-        chunks.push(remaining.slice(0, maxLength));
-        remaining = remaining.slice(maxLength);
+        const paired = /[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(remaining.slice(maxLength - 1, maxLength + 1));
+        const end = paired ? Math.max(2, maxLength - 1) : maxLength;
+        chunks.push(remaining.slice(0, end));
+        remaining = remaining.slice(end);
       }
       current = remaining;
       continue;

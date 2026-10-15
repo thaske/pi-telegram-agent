@@ -48,7 +48,7 @@ export async function loadDurableConfig(cwd: string, agentDir: string): Promise<
   options: HarnessOptions;
   agent: AgentChange;
 }> {
-  const settings = SettingsManager.create(cwd, agentDir);
+  const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,

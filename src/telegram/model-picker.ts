@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { DurableTelegramAgent } from "../pi/durable-agent";
 
-import { getOpenRouterPopularityRanks } from "../openrouter-rankings";
+import { getCachedOpenRouterPopularityRanks } from "../openrouter-rankings";
 import { TelegramApi } from "./api";
 import type {
   TelegramCallbackQuery,
@@ -16,6 +16,7 @@ export class TelegramModelPicker {
   constructor(
     private readonly api: TelegramApi,
     private readonly getSession: () => Pick<DurableTelegramAgent, "isStreaming" | "model" | "models" | "setModel">,
+    private readonly getRanks: () => Map<string, number> | undefined = getCachedOpenRouterPopularityRanks,
   ) {}
 
   hasPendingSearch(chatId: number): boolean {
@@ -165,7 +166,7 @@ export class TelegramModelPicker {
 
   private async getAvailableModels(query?: string) {
     const normalized = query?.trim().toLowerCase();
-    const ranks = await getOpenRouterPopularityRanks().catch(() => undefined);
+    const ranks = this.getRanks();
     const models = await this.getSession().models.getAvailable();
     return models.filter((model) => {
         if (!normalized) return true;

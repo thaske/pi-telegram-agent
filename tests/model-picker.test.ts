@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 import type { DurableTelegramAgent } from "../src/pi/durable-agent";
 
@@ -39,7 +39,7 @@ function pickerHarness(): {
       selected.push(`${model.provider}/${model.id}`);
     },
   } as unknown as DurableTelegramAgent;
-  return { picker: new TelegramModelPicker(api, () => session), selected };
+  return { picker: new TelegramModelPicker(api, () => session, () => undefined), selected };
 }
 
 function setCallback(id: string): TelegramCallbackQuery {
@@ -51,20 +51,7 @@ function setCallback(id: string): TelegramCallbackQuery {
   };
 }
 
-const originalFetch = globalThis.fetch;
-
 describe("Telegram model picker", () => {
-  beforeEach(() => {
-    // Keep the OpenRouter ranking lookup offline so ordering stays local.
-    globalThis.fetch = (async () => {
-      throw new Error("offline");
-    }) as unknown as typeof fetch;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
   test("selects the tapped model regardless of the active search filter", async () => {
     const { picker, selected } = pickerHarness();
 

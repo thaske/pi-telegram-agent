@@ -29,6 +29,22 @@ test("default durable storage is persistent and separated by working directory",
   expect(first).not.toBe(defaultStoragePath("/work/two", "/agent"));
 });
 
+for (const policy of ["ask", "never"]) {
+  test(`malformed untrusted project settings cannot prevent startup under ${policy}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "telegram-untrusted-settings-"));
+    const agentDir = join(dir, "agent"), cwd = join(dir, "workspace");
+    try {
+      await mkdir(agentDir);
+      await mkdir(join(cwd, ".pi"), { recursive: true });
+      await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProjectTrust: policy }));
+      await writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "offline" } }));
+      await writeFile(join(cwd, ".pi", "settings.json"), "{ invalid json");
+      const config = await loadDurableConfig(cwd, agentDir);
+      expect(config.agent.model).toBeDefined();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+}
+
 test("configuration reuses prompts, skills and policy without executing SDK extensions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "telegram-config-"));
   const agentDir = join(dir, "agent");

@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import { TELEGRAM_PREFIX } from "../constants";
 import { guessExtensionFromMime, guessMediaType } from "../utils";
 import { TelegramApi } from "./api";
+import { telegramTurnId } from "./identity";
+
+export { telegramTurnId } from "./identity";
 import type {
   DownloadedTelegramFile,
   PendingTelegramTurn,
@@ -101,11 +104,12 @@ export function collectTelegramFileInfos(
 export async function buildTelegramFiles(
   api: TelegramApi,
   messages: TelegramMessage[],
+  signal?: AbortSignal,
 ): Promise<DownloadedTelegramFile[]> {
   const downloaded: DownloadedTelegramFile[] = [];
   for (const file of collectTelegramFileInfos(messages))
     downloaded.push({
-      path: await api.downloadFile(file.file_id, file.fileName),
+      path: await api.downloadFile(file.file_id, file.fileName, signal),
       fileName: file.fileName,
       isImage: file.isImage,
       mimeType: file.mimeType,
@@ -113,15 +117,10 @@ export async function buildTelegramFiles(
   return downloaded;
 }
 
-export function telegramTurnId(messages: TelegramMessage[]): string {
-  const first = messages[0];
-  if (!first) throw new Error("Missing Telegram message");
-  return `telegram:${first.chat.id}:${messages.map((message) => message.message_id).sort((a, b) => a - b).join(",")}`;
-}
-
 export async function createTelegramTurn(
   api: TelegramApi,
   messages: TelegramMessage[],
+  signal?: AbortSignal,
 ): Promise<PendingTelegramTurn> {
   const firstMessage = messages[0];
   if (!firstMessage) throw new Error("Missing Telegram message");
@@ -129,7 +128,7 @@ export async function createTelegramTurn(
     .map((m) => (m.text || m.caption || "").trim())
     .filter(Boolean)
     .join("\n\n");
-  const files = await buildTelegramFiles(api, messages);
+  const files = await buildTelegramFiles(api, messages, signal);
   let prompt = `${TELEGRAM_PREFIX}`;
   if (rawText) prompt += ` ${rawText}`;
   if (files.length)

@@ -1,10 +1,13 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 
 import { log } from "./logger";
 import { DurableTelegramAgent, type TelegramTurnResult } from "./pi/durable-agent";
 import { applyMessageChanges, getMessageText } from "./pi/session-messages";
-import { TelegramApi } from "./telegram/api";
+import { TelegramApi, TelegramApiError } from "./telegram/api";
+import { telegramTurnId } from "./telegram/identity";
 import { TelegramCommandHandler } from "./telegram/commands";
 import { createTelegramTurn } from "./telegram/files";
 import { TelegramMediaGroupBuffer } from "./telegram/media-groups";
@@ -35,6 +38,8 @@ export class TelegramBridge {
   private deliveryRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private deliveryAttempts = 0;
   private stopping = false;
+  private pollingSignal: AbortSignal | undefined;
+  private readonly controller = new AbortController();
   private readonly commandHandler: TelegramCommandHandler;
   private readonly mediaGroups: TelegramMediaGroupBuffer;
   private readonly modelPicker: TelegramModelPicker;
@@ -46,7 +51,13 @@ export class TelegramBridge {
     private readonly onFatalError: (error: unknown) => void = () => undefined,
   ) {
     this.api = new TelegramApi(() => this.config);
-    this.preview = new TelegramPreviewManager(this.api);
+    this.preview = new TelegramPreviewManager(this.api, async (_chatId, messageId) => {
+      const turn = this.activeTelegramTurn;
+      if (!turn) throw new Error("No active Telegram preview owner");
+      turn.previewMessageIds ??= [];
+      if (!turn.previewMessageIds.includes(messageId)) turn.previewMessageIds.push(messageId);
+      await this.agent.state.recordPreview(turn.id, messageId);
+    });
     this.progress = new TelegramProgressManager(this.api);
     this.mediaGroups = new TelegramMediaGroupBuffer((messages) => this.dispatchAuthorizedTelegramMessages(messages));
     this.modelPicker = new TelegramModelPicker(this.api, () => this.agent);
@@ -54,12 +65,17 @@ export class TelegramBridge {
       discardPreview: () => this.preview.discard(),
       hasPendingTurn: () => this.activeTelegramTurn !== undefined || this.queuedTelegramTurns.length > 0 || this.mediaGroups.hasPending,
       getSession: () => this.agent,
-      newSession: () => this.agent.newSession(),
+      newSession: (requestId) => this.agent.newSession(requestId),
+      onIdle: () => this.startNextTurnSafely(),
+      onReplyQueued: (turn) => { this.queuedTelegramTurns.push(turn); },
+      onError: (error) => this.onFatalError(error),
     });
     this.unsubscribe = agent.subscribe((event) => this.onAgentEvent(event));
   }
 
   async pollLoop(signal: AbortSignal): Promise<void> {
+    signal = AbortSignal.any([signal, this.controller.signal]);
+    this.pollingSignal = signal;
     if (!this.config.botToken) throw new Error("Telegram bot token is not configured");
     await this.api.call("deleteWebhook", { drop_pending_updates: false }, { signal }).catch(() => undefined);
     await this.api.configureCommands(signal);
@@ -92,13 +108,14 @@ export class TelegramBridge {
       } catch (error) {
         if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
         log(`polling error: ${this.errorText(error)}`);
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        await delay(3000, undefined, { signal }).catch(() => undefined);
       }
     }
   }
 
   async restorePendingTurns(): Promise<boolean> {
     this.queuedTelegramTurns = await this.agent.state.pendingTurns();
+    await this.commandHandler.restore();
     for (const message of await this.agent.state.bufferedMedia()) this.mediaGroups.handle(message);
     const restored = this.queuedTelegramTurns.length > 0;
     await this.startNextTurnIfIdle();
@@ -107,6 +124,8 @@ export class TelegramBridge {
 
   async shutdown(): Promise<void> {
     this.stopping = true;
+    this.controller.abort();
+    this.commandHandler.shutdown();
     this.cancelDeliveryRetry();
     this.preview.stopTypingLoop();
     this.progress.discard();
@@ -118,10 +137,11 @@ export class TelegramBridge {
   }
 
   private async startNextTurnIfIdle(): Promise<void> {
-    if (this.stopping || this.activeTelegramTurn || this.deliveryInFlight || this.queuedTelegramTurns.length === 0) return;
+    if (this.stopping || this.commandHandler.isBusy || this.activeTelegramTurn || this.deliveryInFlight || this.queuedTelegramTurns.length === 0) return;
     const turn = this.queuedTelegramTurns.shift();
     if (!turn) return;
     this.activeTelegramTurn = turn;
+    this.preview.restoreMessages(turn.chatId, turn.previewMessageIds ?? []);
     if (turn.completedResponse) {
       await this.deliverCompletedTurn(turn);
       return;
@@ -142,11 +162,32 @@ export class TelegramBridge {
 
   private async dispatchAuthorizedTelegramMessages(messages: TelegramMessage[]): Promise<void> {
     if (this.stopping) return;
+    const unprocessed = await this.agent.state.unprocessedMessages(messages);
+    const ids = new Set(unprocessed.map((message) => message.message_id));
+    const received = messages.filter((message) => !ids.has(message.message_id));
+    if (received.length) await this.agent.state.completeMedia(received);
+    messages = unprocessed;
+    if (!messages.length) return;
     if (await this.commandHandler.handle(messages)) {
       await this.agent.state.completeMedia(messages);
       return;
     }
-    const turn = await createTelegramTurn(this.api, messages);
+    let turn: PendingTelegramTurn;
+    try {
+      turn = await createTelegramTurn(this.api, messages, this.pollingSignal ?? this.controller.signal);
+    } catch (error) {
+      if (!(error instanceof TelegramApiError && error.permanent)) throw error;
+      // Reject this input durably rather than poisoning the polling offset.
+      const first = messages[0];
+      turn = {
+        id: telegramTurnId(messages), chatId: first.chat.id, replyToMessageId: first.message_id,
+        content: [], historyText: "(Telegram attachment unavailable)", queuedAttachments: [],
+        completedResponse: {
+          text: `Could not read this Telegram attachment: ${error.message.slice(0, 500)}`,
+          textDelivered: false, queuedAttachments: [],
+        },
+      };
+    }
     if (this.stopping || !await this.agent.enqueueTurn(turn, messages)) return;
     this.queuedTelegramTurns.push(turn);
     await this.startNextTurnIfIdle();
@@ -154,8 +195,7 @@ export class TelegramBridge {
 
   private async handleAuthorizedTelegramMessage(message: TelegramMessage): Promise<void> {
     if (message.media_group_id) {
-      await this.agent.state.bufferMedia(message);
-      this.mediaGroups.handle(message);
+      if (await this.agent.state.bufferMedia(message)) this.mediaGroups.handle(message);
       return;
     }
     await this.dispatchAuthorizedTelegramMessages([message]);
@@ -164,10 +204,11 @@ export class TelegramBridge {
   private async handleAuthorizedCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
     if (!query.message) return;
     if (query.data === "turn:stop") {
-      if (this.agent.isStreaming) {
-        await this.agent.abort();
-        await this.api.answerCallbackQuery(query.id, "Aborting current turn…");
-      } else await this.api.answerCallbackQuery(query.id, "No active turn.");
+      const requestId = `telegram:callback:${query.id}`;
+      await this.commandHandler.stopCallback(requestId);
+      const receipt = await this.agent.state.command(requestId);
+      const hadTarget = receipt?.kind === "stop" && (receipt.turnId || receipt.compactionIds.length);
+      await this.api.answerCallbackQuery(query.id, hadTarget ? "Aborting current turn…" : "No active turn.");
       return;
     }
     await this.modelPicker.handleCallbackQuery(query);
@@ -182,10 +223,16 @@ export class TelegramBridge {
         await this.saveConfig(this.config);
       }
       if (query.from.id !== this.config.allowedUserId) {
-        await this.api.answerCallbackQuery(query.id, "This bot is not authorized for your account.");
+        await this.api.answerCallbackQuery(query.id, "This bot is not authorized for your account.")
+          .catch((error: unknown) => log(`authorization notification failed: ${this.errorText(error)}`));
         return;
       }
-      await this.handleAuthorizedCallbackQuery(query);
+      try {
+        await this.handleAuthorizedCallbackQuery(query);
+      } catch (error) {
+        if (!(error instanceof TelegramApiError && error.permanent)) throw error;
+        log(`callback unavailable: ${error.message}`);
+      }
       return;
     }
     // Edits must not replay an already-admitted input.
@@ -194,10 +241,12 @@ export class TelegramBridge {
     if (this.config.allowedUserId === undefined) {
       this.config.allowedUserId = message.from.id;
       await this.saveConfig(this.config);
-      await this.api.sendTextReply(message.chat.id, message.message_id, "Telegram bridge paired with this account.");
+      await this.api.sendTextReply(message.chat.id, message.message_id, "Telegram bridge paired with this account.")
+        .catch((error: unknown) => log(`pairing notification failed: ${this.errorText(error)}`));
     }
     if (message.from.id !== this.config.allowedUserId) {
-      await this.api.sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.");
+      await this.api.sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.")
+        .catch((error: unknown) => log(`authorization notification failed: ${this.errorText(error)}`));
       return;
     }
     await this.handleAuthorizedTelegramMessage(message);
@@ -230,7 +279,8 @@ export class TelegramBridge {
     } else if (event.type === "message_start" && event.message.role === "assistant") {
       this.partialMessage = structuredClone(event.message);
       this.progress.markAssistantStreaming();
-      if (this.preview.hasVisibleText()) void this.preview.finalize(turn.chatId);
+      void this.preview.clear(turn.chatId)
+        .catch((error: unknown) => log(`preview cleanup failed: ${this.errorText(error)}`));
       this.preview.reset(turn.replyToMessageId);
     } else if (event.type === "message_update") {
       this.handleMessageUpdate(event);
@@ -312,7 +362,9 @@ export class TelegramBridge {
       if (!this.stopping && !this.deliveryRetryTimer) {
         this.deliveryRetryTimer = setTimeout(() => {
           this.deliveryRetryTimer = undefined;
-          void this.deliverCompletedTurn(turn);
+          void this.deliverCompletedTurn(turn).catch((error: unknown) => {
+            if (!this.stopping) this.onFatalError(error);
+          });
         }, DELIVERY_RETRY_DELAY_MS);
       }
     }

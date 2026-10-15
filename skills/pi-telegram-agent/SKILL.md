@@ -32,7 +32,7 @@ A legacy `pending-turn.json` in `TEMP_DIR` is imported once before its file is r
 
 `/new` selects a fresh persisted conversation. `/stop` aborts the current run without discarding the Telegram queue. Service shutdown suspends work rather than aborting it.
 
-Keep the SQLite file (and its WAL files) outside temporary cleanup paths, and run only one bot process per database. Telegram delivery is at-least-once across a crash between a successful send and its receipt commit.
+Keep the SQLite file (and its WAL files) outside temporary cleanup paths, and run only one bot process per database. Input receipts are per Telegram message, including album members. `/new` and `/compact` retain durable command identities; compaction runs outside polling and can be stopped. Reply delivery tracks each physical text chunk/file, and legacy preview IDs survive restart for cleanup. Telegram delivery is still at-least-once across a crash between a successful send and its receipt commit.
 
 ## Registered Telegram Commands
 

@@ -11,7 +11,8 @@ systemd → bun run src/main.ts → pi-durable Harness → SQLite
 - Reuses Pi's configuration services for `settings.json`, `auth.json`, `models.json`, skills, context files, and `SYSTEM.md` / `APPEND_SYSTEM.md`.
 - Runs native durable `read`, `bash`, `edit`, and `write` tools in `PI_TELEGRAM_CWD`.
 - Persists conversations, model/tool checkpoints, the Telegram queue, buffered albums, attachment intents, and reply-delivery receipts in SQLite.
-- Resumes interrupted runs from their last committed checkpoint. Stable Telegram request IDs prevent redelivery from submitting the same input twice.
+- Resumes interrupted runs from their last committed checkpoint. Per-message receipts prevent redelivery—including partial albums—from submitting the same input twice. New late album members are admitted separately without replaying earlier members.
+- Durably rejects permanently unavailable Telegram files without blocking subsequent messages. Transient preparation failures remain retryable.
 - Polls Telegram directly.
 - Registers Telegram bot command suggestions:
   - `/new`
@@ -20,9 +21,10 @@ systemd → bun run src/main.ts → pi-durable Harness → SQLite
   - `/model`
   - `/stop`
 - Reopens the selected durable conversation after a restart.
-- `/new` creates and durably selects a fresh conversation, preserving the current model and keeping older conversations in storage.
+- `/new` creates and durably selects a fresh conversation, preserving the current model and keeping older conversations in storage. Its request receipt commits with the selection, so a failed notification cannot create another conversation on retry.
+- `/compact` runs outside the polling handler, remains stoppable with `/stop`, and resumes its original task after restart. Completion notices use the durable reply queue.
 - `/model` opens a Telegram inline keyboard to select or search any authenticated Pi model, sorted by OpenRouter weekly popularity when available.
-- Streams assistant previews back to Telegram, using Bot API 10.1 rich message drafts when available.
+- Streams temporary assistant previews back to Telegram, using Bot API 10.1 rich message drafts when available. Legacy previews stay within one message; their IDs are persisted for cleanup after restart. Only the durable outbox sends final answers.
 - Shows a throttled in-chat progress panel for long turns, including safe thinking status, tool-call lifecycle summaries, retries/compaction, elapsed time, and a Stop button.
 - Sends assistant output as Bot API 10.1 rich Markdown messages when available (headings, lists, tables, media blocks, quotes, footnotes, formulas, and nested formatting), with automatic fallback to legacy Telegram HTML formatting.
 - Supports Telegram image/file downloads.
@@ -41,7 +43,9 @@ The bot now uses native `pi-durable` conversations and tasks, not `AgentSessionR
 
 Durable tools follow their own replay policies: completed calls are not repeated; interrupted calls only rerun when declared replay-safe. `/stop` aborts the current run; shutting down suspends it for the next process. Queued Telegram turns remain queued.
 
-Telegram sends cannot be part of a SQLite transaction. Delivery receipts prevent resending acknowledged text/files, but a crash after Telegram accepts a send and before its receipt commits can still duplicate that send.
+Telegram sends cannot be part of a SQLite transaction. The reply outbox freezes a physical message plan and commits a receipt after each acknowledged chunk/file; ordinary retries do not resend a successful prefix. A crash after Telegram accepts a send and before its receipt commits can still duplicate that send. Ambiguous transport failures are retried by the outbox, not immediately resent using a different format.
+
+The state additions are backward-compatible with existing databases and pending journals. On first open, individual input receipts are recovered from retained pending/completed Telegram turn IDs. Receipts older than the previous version's retained history cannot be reconstructed.
 
 ## Config
 
